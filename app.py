@@ -377,10 +377,10 @@ def _apply_app_theme() -> None:
         }
 
         .slot-card {
-            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
-            border: 1px solid #d6e1ea;
+            background: linear-gradient(180deg, #f7f9fb 0%, #f1f5f7 100%);
+            border: 1px solid #4f748b;
             border-radius: 16px;
-            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+            box-shadow: 0 10px 24px rgba(79, 116, 139, 0.14);
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
@@ -395,7 +395,7 @@ def _apply_app_theme() -> None:
         }
 
         .slot-card-label {
-            color: var(--app-muted);
+            color: #4f748b;
             font-size: 0.7rem;
             font-weight: 700;
             letter-spacing: 0.08em;
@@ -405,7 +405,7 @@ def _apply_app_theme() -> None:
         .slot-card-name {
             color: #e85d04;
             font-size: 1.06rem;
-            font-weight: 600;
+            font-weight: 700;
             line-height: 1.22;
             margin-top: 0.28rem;
         }
@@ -415,13 +415,13 @@ def _apply_app_theme() -> None:
         }
 
         .slot-card-name--empty {
-            color: #94a3b8;
+            color: #8ea4b3;
         }
 
         .slot-card-surgery {
-            color: #0077b6;
+            color: #4f748b;
             font-size: 0.82rem;
-            font-weight: 400;
+            font-weight: 500;
             line-height: 1.3;
             margin-top: 0.35rem;
             min-height: 1.9rem;
@@ -682,7 +682,7 @@ def _render_login_screen() -> bool:
         unsafe_allow_html=True,
     )
 
-    with st.form("supabase_login_form", clear_on_submit=False):
+    with st.form("supabase_login_form", clear_on_submit=False, border=False):
         email = st.text_input("Email", placeholder="name@example.com")
         password = st.text_input("Password", type="password", placeholder="Password")
         submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
@@ -878,6 +878,14 @@ def _prepare_future_requests_for_display(future_requests: pd.DataFrame) -> pd.Da
     requests = future_requests.copy()
     requests["cover_date"] = pd.to_datetime(requests["cover_date"], errors="coerce")
     requests["submission_timestamp"] = pd.to_datetime(requests["submission_timestamp"], errors="coerce")
+    if "created_at" in requests.columns:
+        requests["created_at"] = pd.to_datetime(requests["created_at"], errors="coerce")
+        requests["submitted_at_display"] = requests["submission_timestamp"].where(
+            requests["submission_timestamp"].notna(),
+            requests["created_at"],
+        )
+    else:
+        requests["submitted_at_display"] = requests["submission_timestamp"]
     requests["status"] = (
         requests["status"]
         .fillna("Pending")
@@ -886,11 +894,19 @@ def _prepare_future_requests_for_display(future_requests: pd.DataFrame) -> pd.Da
         .replace("", "Pending")
     )
     requests = requests.dropna(subset=["cover_date"]).sort_values(
-        by=["cover_date", "submission_timestamp"],
+        by=["cover_date", "submitted_at_display"],
         kind="stable",
     )
 
     return requests
+
+
+def _request_submitted_at_value(request: pd.Series) -> object:
+    for field in ["submitted_at_display", "submission_timestamp", "created_at"]:
+        value = request.get(field)
+        if not pd.isna(value):
+            return value
+    return None
 
 
 def _future_request_card_markup(request: pd.Series) -> str:
@@ -904,7 +920,7 @@ def _future_request_card_markup(request: pd.Series) -> str:
     surgery = escape(str(request.get("surgery", "") or "Unknown surgery").strip())
     session = escape(str(request.get("session", "") or "Session not set").strip())
     reason = escape(str(request.get("reason", "") or "Not provided").strip())
-    submitted_at = escape(_format_datetime(request.get("submission_timestamp"), "%d %b %Y %H:%M"))
+    submitted_at = escape(_format_datetime(_request_submitted_at_value(request), "%d %b %Y %H:%M"))
     notes_html = (
         f"<div class='request-notes'><strong>Notes</strong><br>{escape(notes)}</div>"
         if notes
@@ -933,7 +949,7 @@ def _future_request_card_markup(request: pd.Series) -> str:
 def _future_request_public_card_markup(request: pd.Series) -> str:
     surgery = escape(str(request.get("surgery", "") or "Unknown surgery").strip())
     requester = escape(str(request.get("name", "") or "Unknown requester").strip())
-    submitted_at = escape(_format_datetime(request.get("submission_timestamp"), "%d %b %Y %H:%M"))
+    submitted_at = escape(_format_datetime(_request_submitted_at_value(request), "%d %b %Y %H:%M"))
 
     return f"""
         <div class="public-request-card">
@@ -1064,7 +1080,7 @@ def _render_future_requests_board(future_requests: pd.DataFrame, *, sidebar: boo
         st.sidebar.toggle(
             "Send rejection emails",
             key="sidebar_send_rejection_emails",
-            value=st.session_state.get("sidebar_send_rejection_emails", False),
+            value=st.session_state.get("sidebar_send_rejection_emails", True),
             help="When on, rejecting a future request sends an email to the requester. When off, the request is only marked as rejected.",
         )
 
@@ -1872,6 +1888,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
         ].copy()
     else:
         visible_cover_requests_df = cover_requests_df
+    visible_cover_requests_df = _prepare_future_requests_for_display(visible_cover_requests_df)
 
     if end_date_beyond < start_date_beyond:
         st.info("Move the date range further ahead to view or submit future cover requests.")
@@ -1883,10 +1900,10 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
             st.markdown(f"**{current_date_beyond.strftime('%A, %d %B %Y')}**")
 
             # Display existing cover requests for this date
-            if 'cover_date' in visible_cover_requests_df.columns and 'submission_timestamp' in visible_cover_requests_df.columns:
+            if 'cover_date' in visible_cover_requests_df.columns:
                 daily_cover_requests = visible_cover_requests_df[
                     visible_cover_requests_df['cover_date'].dt.date == current_date_beyond
-                ].sort_values(by='submission_timestamp')
+                ].sort_values(by='submitted_at_display')
             else:
                 daily_cover_requests = pd.DataFrame()
 

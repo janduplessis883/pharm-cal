@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 import pandas as pd
@@ -23,6 +23,7 @@ COVER_REQUEST_HEADERS = [
     "requester_email",
     "status",
     "decision_timestamp",
+    "created_at",
 ]
 
 SESSION_SELECT = """
@@ -68,6 +69,7 @@ submission_timestamp,
 requester_email,
 status,
 decision_timestamp,
+created_at,
 requester_user_id,
 requester_user:users!cover_requests_requester_user_id_fkey(
     id,
@@ -91,17 +93,37 @@ def _get_secret(*keys: str) -> str | None:
             if value is not None:
                 return str(value)
 
-    supabase_section = st.secrets.get("supabase")
-    if supabase_section:
+    normalized_top_level = {
+        str(existing_key).strip().casefold(): existing_key
+        for existing_key in st.secrets.keys()
+    }
+    for key in keys:
+        existing_key = normalized_top_level.get(str(key).strip().casefold())
+        if existing_key is not None:
+            value = st.secrets.get(existing_key)
+            if value is not None and not hasattr(value, "keys"):
+                return str(value)
+
+    for section_name in st.secrets:
+        section = st.secrets.get(section_name)
+        if not hasattr(section, "keys"):
+            continue
+
+        normalized_section = str(section_name).strip().casefold()
+        normalized_section_keys = {
+            str(existing_key).strip().casefold(): existing_key
+            for existing_key in section.keys()
+        }
         for key in keys:
             normalized_key = str(key).strip().casefold()
             candidates = {
                 normalized_key,
-                normalized_key.removeprefix("supabase_"),
+                normalized_key.removeprefix(f"{normalized_section}_"),
             }
             for candidate in candidates:
-                if candidate and candidate in supabase_section:
-                    value = supabase_section[candidate]
+                existing_key = normalized_section_keys.get(candidate)
+                if candidate and existing_key is not None:
+                    value = section[existing_key]
                     if value is not None:
                         return str(value)
     return None
@@ -316,6 +338,7 @@ def _request_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
         "requester_email": requester.get("email") or row.get("requester_email") or "",
         "status": row.get("status") or "",
         "decision_timestamp": row.get("decision_timestamp"),
+        "created_at": row.get("created_at"),
         "requester_user_id": row.get("requester_user_id") or requester.get("id"),
     }
 
@@ -551,7 +574,7 @@ def get_cover_requests_data() -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame(columns=COVER_REQUEST_HEADERS + ["requester_user_id"])
 
-        for column in ["cover_date", "submission_timestamp", "decision_timestamp"]:
+        for column in ["cover_date", "submission_timestamp", "decision_timestamp", "created_at"]:
             if column in df.columns:
                 df[column] = pd.to_datetime(df[column], errors="coerce")
         if "requester_email" in df.columns:
@@ -589,6 +612,7 @@ def add_cover_request_data(
             "session": session,
             "reason": reason.strip(),
             "desc": desc.strip(),
+            "submission_timestamp": datetime.now(timezone.utc).isoformat(),
             "requester_email": requester["email"],
             "status": "Pending",
             "requester_user_id": requester["id"],
@@ -935,7 +959,19 @@ END:VCALENDAR"""
 
 
 def send_resend_email(to_email: str, subject: str, html_content: str, attachment_path: str | None = None) -> bool:
-    resend.api_key = _get_secret("RESEND_API_KEY")
+    resend_api_key = _get_secret(
+        "RESEND_API_KEY",
+        "resend_api_key",
+        "RESEND_KEY",
+        "resend_key",
+        "API_KEY",
+        "api_key",
+    )
+    if not resend_api_key:
+        st.error("Resend API key is missing. Add it to Streamlit secrets as `RESEND_API_KEY` or under a `[resend]` section.")
+        return False
+
+    resend.api_key = resend_api_key
 
     if attachment_path:
         with open(attachment_path, "rb") as handle:
