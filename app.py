@@ -1,17 +1,47 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import gspread
-from gspread.utils import ValueInputOption
 from html import escape
 import time
 
 # Local Imports
 from plots import display_plot, display_normalized_sessions_plot
-from core import client
 
-# Google Sheet details
-from core import SPREADSHEET_ID, SHEET_NAME, get_schedule_data, get_cover_requests_data, add_cover_request_data, get_surgeries_data, add_surgery_data, delete_surgery_data, get_pharmacists_data, add_pharmacist_data, delete_pharmacist_data, cancel_booking, update_booking, accept_cover_request, reject_cover_request
+from core import (
+    get_schedule_data,
+    get_cover_requests_data,
+    add_cover_request_data,
+    get_surgeries_data,
+    add_surgery_data,
+    delete_surgery_data,
+    get_users_data,
+    add_user_data,
+    delete_user_data,
+    get_pharmacists_data,
+    add_pharmacist_data,
+    delete_pharmacist_data,
+    cancel_booking,
+    update_booking,
+    accept_cover_request,
+    reject_cover_request,
+    save_availability_change,
+    sign_in_with_email_password,
+    sign_out_authenticated_user,
+)
+
+
+def _get_admin_password() -> str:
+    direct_value = st.secrets.get("admin_password")
+    if direct_value is not None:
+        return str(direct_value)
+
+    supabase_section = st.secrets.get("supabase")
+    if supabase_section:
+        nested_value = supabase_section.get("admin_password")
+        if nested_value is not None:
+            return str(nested_value)
+
+    return ""
 
 
 st.set_page_config(
@@ -89,6 +119,102 @@ def _get_surgery_contact_defaults(surgeries_df: pd.DataFrame, selected_surgery: 
     prefilled_name = str(selected_row.get(name_column, "") or "").strip() if name_column else ""
     prefilled_email = str(selected_row.get(email_column, "") or "").strip() if email_column else ""
     return prefilled_name, prefilled_email
+
+
+def _slot_identity(slot: dict[str, object] | pd.Series) -> str:
+    slot_id = str(slot.get("id", "") or "").strip()
+    if slot_id:
+        return slot_id
+    return str(slot.get("unique_code", "") or "").strip()
+
+
+def _build_surgery_options(surgeries_df: pd.DataFrame) -> list[dict[str, str]]:
+    required_columns = {"id", "surgery", "email"}
+    if surgeries_df.empty or not required_columns.issubset(surgeries_df.columns):
+        return []
+
+    normalized_counts = (
+        surgeries_df["surgery"].fillna("").astype(str).str.strip().str.casefold().value_counts()
+    )
+    options: list[dict[str, str]] = []
+    for _, row in surgeries_df.iterrows():
+        surgery = str(row.get("surgery", "") or "").strip()
+        email = str(row.get("email", "") or "").strip()
+        user_id = str(row.get("id", "") or "").strip()
+        contact_name = str(row.get("name", "") or "").strip()
+        if not surgery or not email or not user_id:
+            continue
+        duplicate_count = normalized_counts.get(surgery.casefold(), 0)
+        label = f"{surgery} ({email})" if duplicate_count > 1 else surgery
+        options.append(
+            {
+                "id": user_id,
+                "label": label,
+                "surgery": surgery,
+                "email": email,
+                "name": contact_name,
+            }
+        )
+
+    return sorted(options, key=lambda option: (option["surgery"].casefold(), option["email"].casefold()))
+
+
+def _build_user_options(users_df: pd.DataFrame) -> list[dict[str, str]]:
+    required_columns = {"id", "surgery", "email", "name"}
+    if users_df.empty or not required_columns.issubset(users_df.columns):
+        return []
+
+    normalized_counts = (
+        users_df["surgery"].fillna("").astype(str).str.strip().str.casefold().value_counts()
+    )
+    options: list[dict[str, str]] = []
+    for _, row in users_df.iterrows():
+        surgery = str(row.get("surgery", "") or "").strip()
+        email = str(row.get("email", "") or "").strip()
+        user_id = str(row.get("id", "") or "").strip()
+        contact_name = str(row.get("name", "") or "").strip()
+        role = str(row.get("role", "") or "").strip()
+        if not surgery or not email or not user_id:
+            continue
+        duplicate_count = normalized_counts.get(surgery.casefold(), 0)
+        if duplicate_count > 1:
+            label = f"{surgery} ({contact_name or email})"
+        else:
+            label = surgery
+        options.append(
+            {
+                "id": user_id,
+                "label": label,
+                "surgery": surgery,
+                "email": email,
+                "name": contact_name,
+                "role": role,
+            }
+        )
+
+    return sorted(options, key=lambda option: (option["surgery"].casefold(), option["email"].casefold(), option["name"].casefold()))
+
+
+USER_ROLE_OPTIONS = [
+    "normal",
+    "superuser",
+]
+
+FULL_ACCESS_ROLES = {
+    "superuser",
+}
+
+
+def _authenticated_user() -> dict[str, str]:
+    return st.session_state.get("auth_user", {}) or {}
+
+
+def _current_user_can_access_all_clinics() -> bool:
+    return str(_authenticated_user().get("app_role", "") or "").strip() in FULL_ACCESS_ROLES
+
+
+def _current_user_surgery_id() -> str:
+    return str(_authenticated_user().get("surgery_id", "") or "").strip()
 
 
 def _normalize_schedule_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -530,6 +656,68 @@ def _render_section_band(title: str, eyebrow: str | None = None, copy: str | Non
     )
 
 
+def _render_authenticated_greeting(user: dict[str, str]) -> None:
+    display_name = str(user.get("display_name", "") or user.get("email", "") or "there").strip()
+    email = str(user.get("email", "") or "").strip()
+    role = str(user.get("app_role", "") or "").strip()
+    surgery = str(user.get("surgery", "") or "").strip()
+    summary_parts = [part for part in [email, role, surgery] if part]
+    email_line = f"<div class='app-hero-copy'>{escape(' · '.join(summary_parts))}</div>" if summary_parts else ""
+    st.markdown(
+        f"""
+        <div class="app-hero">
+            <div class="app-hero-kicker">Welcome</div>
+            <div class="app-hero-title">Hello, {escape(display_name)}</div>
+            {email_line}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_login_screen() -> bool:
+    _apply_app_theme()
+    st.sidebar.empty()
+    st.markdown(
+        """
+        <div class="app-hero">
+            <div class="app-hero-kicker">Brompton Health PCN</div>
+            <div class="app-hero-title">Sign in to Pharm-Cal</div>
+            <div class="app-hero-copy">Use your Supabase email and password to open the booking calendar.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("supabase_login_form", clear_on_submit=False):
+        email = st.text_input("Email", placeholder="name@example.com")
+        password = st.text_input("Password", type="password", placeholder="Password")
+        submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
+
+    if submitted:
+        if not email.strip() or not password:
+            st.error("Enter both your email address and password.")
+            return False
+        try:
+            st.session_state.auth_user = sign_in_with_email_password(email, password)
+            st.success("Signed in successfully.")
+            time.sleep(0.2)
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Unable to sign in with Supabase: {exc}")
+
+    return False
+
+
+def _require_authenticated_user() -> dict[str, str] | None:
+    auth_user = st.session_state.get("auth_user")
+    if auth_user:
+        return auth_user
+
+    _render_login_screen()
+    return None
+
+
 def _render_slot_card(
     pharmacist_name: str | None,
     *,
@@ -876,7 +1064,7 @@ def show_admin_panel(df):
     df = _normalize_schedule_data(df)
     unbook_mode = False  # Default value
     _render_section_header("Admin Options", eyebrow="Workspace", copy="Manage scheduling, directory data, and analytics.", sidebar=True)
-    admin_tab = st.sidebar.radio("Admin Options", ["Manage Availability", "View Future Requests", "Manage Surgeries", "Manage Pharmacists", "Surgery Session Plots"], key="admin_options_radio", width="stretch")
+    admin_tab = st.sidebar.radio("Admin Options", ["Manage Availability", "View Future Requests", "Manage Surgeries", "Manage Users", "Manage Pharmacists", "Surgery Session Plots"], key="admin_options_radio", width="stretch")
 
     if admin_tab == "Surgery Session Plots":
         st.session_state.view = 'plot'
@@ -920,11 +1108,13 @@ def show_admin_panel(df):
                 for _, row in df_copy.iterrows():
                     key = (row['Date'], int(row['slot_index']), row['am_pm'])
                     current_availability[key] = {
+                        'id': row.get('id', ''),
                         'booked': str(row.get('booked', 'FALSE')).upper() == "TRUE",
                         'surgery': row.get('surgery', ''),
                         'email': row.get('email', ''),
                         'unique_code': row.get('unique_code', ''),
-                        'pharmacist_name': row.get('pharmacist_name', 'None')
+                        'pharmacist_name': row.get('pharmacist_name', 'None'),
+                        'pharmacist_id': row.get('pharmacist_id', ''),
                     }
 
             for date in dates_to_show:
@@ -997,32 +1187,13 @@ def show_admin_panel(df):
 
             submitted = st.form_submit_button("Update Availability", type="primary", icon=":material/save:", width="stretch")
             if submitted:
-                EXPECTED_HEADERS = ["unique_code", "Date", "am_pm", "booked", "surgery", "email", "pharmacist_name", "slot_index"]
                 try:
-                    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
-                    try:
-                        headers = sheet.row_values(1)
-                        if not headers: # Check if the first row is empty
-                            sheet.update([EXPECTED_HEADERS])
-                            headers = EXPECTED_HEADERS
-                    except gspread.exceptions.APIError as e:
-                        # This can happen if the sheet is completely empty
-                        sheet.update([EXPECTED_HEADERS])
-                        headers = EXPECTED_HEADERS
-
-                    # Ensure all expected headers are present
-                    if not all(h in headers for h in EXPECTED_HEADERS):
-                        st.error("The sheet is missing required headers. Please check the sheet configuration.")
-                        st.stop()
-
-                    pharmacist_name_col_idx = headers.index('pharmacist_name') + 1
-
                     with st.spinner("Updating availability... This may take a moment."):
                         for date in dates_to_show:
-                            if date.weekday() >= 5: continue
+                            if date.weekday() >= 5:
+                                continue
 
-                            for i in range(3): # Number of pharmacist columns
+                            for i in range(3):
                                 for shift_type in ['am', 'pm']:
                                     slot_key = f"avail_{date.strftime('%Y%m%d')}_{shift_type}_{i}"
 
@@ -1035,58 +1206,13 @@ def show_admin_panel(df):
                                         continue
 
                                     if new_pharmacist != original_pharmacist:
-                                        unique_code = slot_info.get('unique_code') or f"{int(date.timestamp())}-{shift_type}-{i}"
-
-                                        # Find cell for existing entries (deletion or modification)
-                                        cell_to_modify = None
-                                        if original_pharmacist != 'None' and unique_code:
-                                            try:
-                                                cell_to_modify = sheet.find(unique_code)
-                                            except gspread.exceptions.APIError as e: # Changed to gspread.exceptions.APIError
-                                                # This can happen if data is out of sync. We can proceed as if it wasn't there.
-                                                pass
-
-                                        # Case 1: Deletion
-                                        if new_pharmacist == 'None':
-                                            if cell_to_modify:
-                                                sheet.delete_rows(cell_to_modify.row)
-
-                                        # Case 2: Addition
-                                        elif original_pharmacist == 'None':
-                                            new_row_data = {
-                                                "unique_code": unique_code,
-                                                "Date": date.strftime('%Y-%m-%d'),
-                                                "am_pm": shift_type,
-                                                "booked": "FALSE",
-                                                "surgery": "",
-                                                "email": "",
-                                                "pharmacist_name": new_pharmacist,
-                                                "slot_index": i
-                                            }
-                                            # Build the row in the correct order based on sheet headers
-                                            ordered_row_values = [new_row_data.get(h, "") for h in headers]
-                                            sheet.append_row(ordered_row_values, value_input_option=ValueInputOption.raw)
-
-                                        # Case 3: Modification
-                                        else:
-                                            if cell_to_modify:
-                                                sheet.update_cell(cell_to_modify.row, pharmacist_name_col_idx, new_pharmacist)
-                                            else:
-                                                # The original entry was not found, so treat it as an addition
-                                                st.warning(f"Could not find slot {unique_code} to modify. Adding it as a new entry.")
-                                                new_row_data = {
-                                                    "unique_code": unique_code,
-                                                    "Date": date.strftime('%Y-%m-%d'),
-                                                    "am_pm": shift_type,
-                                                    "booked": "FALSE",
-                                                    "surgery": "",
-                                                    "email": "",
-                                                    "pharmacist_name": new_pharmacist,
-                                                    "slot_index": i
-                                                }
-                                                ordered_row_values = [new_row_data.get(h, "") for h in headers]
-                                                sheet.append_row(ordered_row_values, value_input_option=ValueInputOption.raw)
-
+                                        save_availability_change(
+                                            slot_date=date.date(),
+                                            shift_type=shift_type,
+                                            slot_index=i,
+                                            slot_info=slot_info,
+                                            pharmacist_name=new_pharmacist,
+                                        )
 
                     st.success("Availability updated successfully!")
                     time.sleep(1)
@@ -1099,32 +1225,79 @@ def show_admin_panel(df):
         _render_section_header("Manage Surgeries", eyebrow="Directory", copy="Keep the surgery directory and list sizes up to date.", sidebar=True)
         with st.sidebar.form("add_surgery_form", clear_on_submit=True):
             new_surgery_name = st.text_input("Surgery Name")
-            new_surgery_email = st.text_input("Email Address")
             new_list_size = st.number_input("List Size", min_value=0, step=1)
             add_surgery_submitted = st.form_submit_button("Add Surgery", type="primary", icon=":material/add:", width="stretch")
 
             if add_surgery_submitted:
-                if new_surgery_name and new_surgery_email:
-                    add_surgery_data(new_surgery_name, new_surgery_email, new_list_size)
+                if new_surgery_name:
+                    add_surgery_data(new_surgery_name, new_list_size)
                 else:
-                    st.error("Both surgery name and email are required.")
+                    st.error("Surgery name is required.")
 
         st.sidebar.caption("Existing surgeries")
         surgeries_df = get_surgeries_data()
-        if not surgeries_df.empty and {'surgery', 'email'}.issubset(surgeries_df.columns):
+        if not surgeries_df.empty and {'id', 'surgery', 'list_size'}.issubset(surgeries_df.columns):
             surgeries_df = surgeries_df.assign(
                 surgery_sort=surgeries_df["surgery"].fillna("").astype(str).str.strip().str.casefold()
             ).sort_values("surgery_sort", kind="stable")
             for idx, row in surgeries_df.iterrows():
                 col1, col2 = st.sidebar.columns([0.8, 0.2])
                 with col1:
-                    st.markdown(f"**{row['surgery']}**<br>{row['email']}", unsafe_allow_html=True)
+                    user_count = int(row.get("user_count", 0) or 0)
+                    st.markdown(
+                        f"**{row['surgery']}**<br>List size: {int(row.get('list_size', 0) or 0)}<br>Users: {user_count}",
+                        unsafe_allow_html=True,
+                    )
                 with col2:
                     if st.button(":material/delete:", key=f"delete_surgery_{idx}", type="tertiary", width="stretch"):
-                        delete_surgery_data(row['surgery'], row['email'])
+                        delete_surgery_data(str(row['id']))
                         st.rerun()
         else:
             st.sidebar.info("No surgeries saved yet.")
+
+    elif admin_tab == "Manage Users":
+        _render_section_header("Manage Users", eyebrow="Directory", copy="Add and remove user contacts under each surgery.", sidebar=True)
+        surgeries_df = get_surgeries_data()
+        surgery_choices = {
+            str(row["surgery"]): str(row["id"])
+            for _, row in surgeries_df.iterrows()
+            if str(row.get("id", "") or "").strip() and str(row.get("surgery", "") or "").strip()
+        }
+
+        with st.sidebar.form("add_user_form", clear_on_submit=True):
+            new_user_name = st.text_input("User Name")
+            new_user_email = st.text_input("User Email")
+            selected_surgery_label = st.selectbox("Surgery", [""] + list(surgery_choices.keys()))
+            selected_role = st.selectbox("Role", USER_ROLE_OPTIONS)
+            add_user_submitted = st.form_submit_button("Add User", type="primary", icon=":material/person_add:", width="stretch")
+
+            if add_user_submitted:
+                selected_surgery_id = surgery_choices.get(selected_surgery_label, "")
+                if new_user_name and new_user_email and selected_surgery_id:
+                    add_user_data(new_user_name, new_user_email, selected_surgery_id, selected_role)
+                else:
+                    st.error("Name, email, and surgery are required.")
+
+        st.sidebar.caption("Existing users")
+        users_df = get_users_data()
+        if not users_df.empty and {'id', 'name', 'email', 'surgery', 'role'}.issubset(users_df.columns):
+            users_df = users_df.assign(
+                surgery_sort=users_df["surgery"].fillna("").astype(str).str.strip().str.casefold(),
+                email_sort=users_df["email"].fillna("").astype(str).str.strip().str.casefold(),
+            ).sort_values(["surgery_sort", "email_sort"], kind="stable")
+            for idx, row in users_df.iterrows():
+                col1, col2 = st.sidebar.columns([0.8, 0.2])
+                with col1:
+                    st.markdown(
+                        f"**{row['name']}**<br>{row['email']}<br>{row['surgery']} · {row['role']}",
+                        unsafe_allow_html=True,
+                    )
+                with col2:
+                    if st.button(":material/delete:", key=f"delete_user_{idx}", type="tertiary", width="stretch"):
+                        delete_user_data(str(row['id']))
+                        st.rerun()
+        else:
+            st.sidebar.info("No users saved yet.")
 
     elif admin_tab == "Manage Pharmacists":
         _render_section_header("Manage Pharmacists", eyebrow="Directory", copy="Maintain the pharmacist list used across bookings and emails.", sidebar=True)
@@ -1165,22 +1338,21 @@ def show_admin_panel(df):
 
         required_columns = {'cover_date', 'surgery', 'name', 'session', 'reason', 'desc', 'submission_timestamp', 'status'}
         if not cover_requests_df.empty and required_columns.issubset(cover_requests_df.columns):
-            today = datetime.today().date()
             selected_range = st.session_state.get("date_range")
             if isinstance(selected_range, tuple) and len(selected_range) == 2:
                 range_start, range_end = selected_range
             else:
-                range_start = today
-                range_end = today + timedelta(days=90)
+                fallback_today = datetime.today().date()
+                range_start = fallback_today
+                range_end = fallback_today + timedelta(days=90)
 
-            visible_start = max(today, range_start)
             future_requests = cover_requests_df[
-                (cover_requests_df['cover_date'].dt.date >= visible_start)
+                (cover_requests_df['cover_date'].dt.date >= range_start)
                 & (cover_requests_df['cover_date'].dt.date <= range_end)
             ].sort_values(by='submission_timestamp')
 
+            st.sidebar.caption(f"Showing requests from {range_start.strftime('%d %b %Y')} to {range_end.strftime('%d %b %Y')}.")
             if not future_requests.empty:
-                st.sidebar.caption(f"Showing requests from {visible_start.strftime('%d %b %Y')} to {range_end.strftime('%d %b %Y')}.")
                 _render_future_requests_board(future_requests, sidebar=True)
             else:
                 st.sidebar.info("No future cover requests found in the selected date range.")
@@ -1193,44 +1365,82 @@ def show_admin_panel(df):
 def show_booking_dialog(slot):
     shift = slot['am_pm'].upper()
     pharmacist_name = slot.get('pharmacist_name', 'Pharmacist') # Default to 'Pharmacist' if name is not available
+    slot_key = _slot_identity(slot)
 
     st.markdown(f"**Booking: {pharmacist_name} — {shift} on {pd.to_datetime(slot['Date']).strftime('%Y-%m-%d')}**")
 
     surgeries_df = get_surgeries_data()
-    surgery_names = _clean_string_values(surgeries_df, "surgery")
-    if not surgery_names:
+    if surgeries_df.empty or "id" not in surgeries_df.columns or "surgery" not in surgeries_df.columns:
         st.warning("No surgeries are configured yet. Add a surgery in the Admin Panel before booking.")
         return
+
+    allow_all_clinics = _current_user_can_access_all_clinics()
+    current_surgery_id = _current_user_surgery_id()
+    if not allow_all_clinics and current_surgery_id:
+        surgeries_df = surgeries_df[surgeries_df["id"].astype(str) == current_surgery_id].copy()
+
+    surgery_records = []
+    for _, row in surgeries_df.iterrows():
+        surgery_id = str(row.get("id", "") or "").strip()
+        surgery_name = str(row.get("surgery", "") or "").strip()
+        if not surgery_id or not surgery_name:
+            continue
+        primary_user_id = str(row.get("primary_user_id", "") or "").strip()
+        primary_user_name = str(row.get("primary_user_name", "") or "").strip()
+        primary_user_email = str(row.get("primary_user_email", "") or "").strip()
+        if allow_all_clinics:
+            label = (
+                f"{surgery_name} ({primary_user_email})"
+                if primary_user_email
+                else f"{surgery_name} (No linked user)"
+            )
+        else:
+            label = surgery_name
+        surgery_records.append(
+            {
+                "id": surgery_id,
+                "label": label,
+                "surgery": surgery_name,
+                "primary_user_id": primary_user_id,
+                "primary_user_name": primary_user_name,
+                "primary_user_email": primary_user_email,
+            }
+        )
+
+    if not surgery_records:
+        st.warning("No clinics are available for your account.")
+        return
+
+    option_labels = [option["label"] for option in surgery_records]
     selected_surgery_option = st.selectbox(
         "Select Surgery",
-        surgery_names,
-        key=f"select_surgery_{slot['unique_code']}"
+        option_labels,
+        key=f"select_surgery_{slot_key}"
+    )
+    selected_option = next(
+        option for option in surgery_records if option["label"] == selected_surgery_option
     )
 
-    if "surgery" in surgeries_df.columns:
-        selected_surgery_row = surgeries_df[surgeries_df["surgery"] == selected_surgery_option]
+    st.text_input("Surgery Name", value=selected_option["surgery"], disabled=True, key=f"display_surgery_{slot_key}_{selected_option['id']}")
+    if selected_option["primary_user_email"]:
+        st.text_input("Contact Email", value=selected_option["primary_user_email"], disabled=True, key=f"display_email_{slot_key}_{selected_option['id']}")
+        st.text_input("Primary Contact", value=selected_option["primary_user_name"], disabled=True, key=f"display_contact_{slot_key}_{selected_option['id']}")
     else:
-        selected_surgery_row = pd.DataFrame()
-
-    prefilled_email = ""
-    if "email" in surgeries_df.columns and not selected_surgery_row.empty:
-        prefilled_email = str(selected_surgery_row["email"].iloc[0]).strip()
-
-    st.text_input("Surgery Name", value=selected_surgery_option, disabled=True, key=f"display_surgery_{slot['unique_code']}_{selected_surgery_option}")
-    st.text_input("Email Address", value=prefilled_email, disabled=True, key=f"display_email_{slot['unique_code']}_{selected_surgery_option}")
-
-    current_surgery = selected_surgery_option
-    current_email = prefilled_email
+        st.info("This clinic has no assigned user contact. The booking will still be saved without a surgery email.")
 
     action_left, action_right = st.columns(2)
-    cancel_button = action_left.button("Cancel", type="secondary", width="stretch", key=f"cancel_booking_dialog_{slot['unique_code']}")
-    submitted = action_right.button("Submit Booking", type="primary", icon=":material/check_circle:", width="stretch", key=f"submit_booking_dialog_{slot['unique_code']}")
+    cancel_button = action_left.button("Cancel", type="secondary", width="stretch", key=f"cancel_booking_dialog_{slot_key}")
+    submitted = action_right.button("Submit Booking", type="primary", icon=":material/check_circle:", width="stretch", key=f"submit_booking_dialog_{slot_key}")
 
     if submitted:
-        if not current_surgery or not current_email:
+        if not selected_option["id"]:
             st.error("All fields are required.")
         else:
-            update_booking(slot, current_surgery, current_email)
+            update_booking(
+                slot,
+                selected_option["id"],
+                selected_option["primary_user_id"] or None,
+            )
             st.success("Booking saved successfully!")
             time.sleep(1.5)
             st.rerun() # Rerun to close dialog and refresh main app
@@ -1242,10 +1452,14 @@ def show_booking_dialog(slot):
 def show_cover_request_dialog(cover_date):
     st.markdown(f"Requesting cover for: **{cover_date.strftime('%A, %d %B %Y')}**")
 
-    surgeries_df = get_surgeries_data()
-    surgery_names = _clean_string_values(surgeries_df, "surgery")
-    if not surgery_names:
-        st.warning("No surgeries are configured yet. Add one in the Admin Panel before submitting a cover request.")
+    users_df = get_users_data()
+    allow_all_clinics = _current_user_can_access_all_clinics()
+    current_surgery_id = _current_user_surgery_id()
+    if not allow_all_clinics and current_surgery_id:
+        users_df = users_df[users_df["surgery_id"].astype(str) == current_surgery_id].copy()
+    surgery_options = _build_user_options(users_df)
+    if not surgery_options:
+        st.warning("No clinic contacts are available for your account.")
         return
 
     date_key = cover_date.strftime('%Y%m%d')
@@ -1254,12 +1468,26 @@ def show_cover_request_dialog(cover_date):
     email_key = f"cover_email_{date_key}"
     prefill_source_key = f"cover_prefill_source_{date_key}"
 
-    selected_surgery = st.selectbox(
-        "Select Surgery",
-        [""] + surgery_names,
-        key=surgery_key,
-    )
-    prefilled_name, prefilled_email = _get_surgery_contact_defaults(surgeries_df, selected_surgery)
+    available_labels = [option["label"] for option in surgery_options]
+    default_index = 0
+    if not allow_all_clinics and available_labels:
+        selected_surgery = st.selectbox(
+            "Select Surgery",
+            available_labels,
+            key=surgery_key,
+            index=0,
+            disabled=True,
+        )
+    else:
+        selected_surgery = st.selectbox(
+            "Select Surgery",
+            [""] + available_labels,
+            key=surgery_key,
+            index=default_index,
+        )
+    selected_option = next((option for option in surgery_options if option["label"] == selected_surgery), None)
+    prefilled_name = selected_option["name"] if selected_option else ""
+    prefilled_email = selected_option["email"] if selected_option else ""
 
     if st.session_state.get(prefill_source_key) != selected_surgery:
         st.session_state[name_key] = prefilled_name
@@ -1273,7 +1501,8 @@ def show_cover_request_dialog(cover_date):
         )
         requested_by_email = st.text_input(
             "Requester Email",
-            key=email_key
+            key=email_key,
+            disabled=True,
         )
 
         selected_session = st.selectbox(
@@ -1316,17 +1545,24 @@ def show_cover_request_dialog(cover_date):
             else:
                 final_description = selected_reason # Use the selected reason as description if not "Other"
 
-            if not selected_surgery or not requested_by_name or not requested_by_email or not selected_session or not final_reason:
+            if not selected_option or not requested_by_name or not requested_by_email or not selected_session or not final_reason:
                 st.error("All fields are required.")
             else:
-                add_cover_request_data(cover_date, selected_surgery, requested_by_name, requested_by_email, selected_session, final_reason, final_description)
+                add_cover_request_data(
+                    cover_date,
+                    selected_option["id"],
+                    requested_by_name,
+                    selected_session,
+                    final_reason,
+                    final_description,
+                )
                 time.sleep(0.2)
                 st.rerun() # Rerun to close dialog and refresh main app
 
         if cancel_button:
             st.rerun() # Rerun to close dialog
 
-def display_calendar(unbook_mode=False):
+def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
     _apply_app_theme()
     c1, c2, c3 = st.columns([0.25, 0.25, 2], gap="small")
     with c1:
@@ -1352,10 +1588,21 @@ def display_calendar(unbook_mode=False):
 
 
     st.logo('images/logo223.png', size="large")
+    with st.sidebar:
+        st.caption(f"Signed in as {auth_user.get('email', '')}")
+        if st.button("Log out", icon=":material/logout:", width="stretch"):
+            try:
+                sign_out_authenticated_user()
+            except Exception:
+                pass
+            st.session_state.pop("auth_user", None)
+            st.rerun()
+
     # --- Admin Sidebar ---
 
     password = st.sidebar.text_input("Admin password", type="password", placeholder="Admin Login", label_visibility="collapsed", icon=":material/settings:")  # Admin password input
-    is_admin = password == st.secrets["admin_password"]
+    configured_admin_password = _get_admin_password()
+    is_admin = bool(configured_admin_password) and password == configured_admin_password
     if password == '':
         st.sidebar.image('images/logo22.png')
     df = _normalize_schedule_data(get_schedule_data())
@@ -1387,7 +1634,7 @@ def display_calendar(unbook_mode=False):
 
     if is_admin:
         unbook_mode = show_admin_panel(df)
-    elif password != "":
+    elif password != "" and configured_admin_password:
         st.sidebar.error("Incorrect password")
 
     # Display content based on the selected view
@@ -1406,6 +1653,7 @@ def display_calendar(unbook_mode=False):
         """,
         unsafe_allow_html=True,
     )
+    _render_authenticated_greeting(auth_user)
 
     if is_admin and st.session_state.get("admin_options_radio") == "View Future Requests":
         _render_section_band(
@@ -1475,7 +1723,8 @@ def display_calendar(unbook_mode=False):
                     surgery_name = row['surgery'] if booked else None
                     _render_slot_card(pharmacist_name, surgery_name=surgery_name, available_slot=True)
                     btn_label = "09:00 - 12:45"
-                    unique_key = f"{row['unique_code']}_{pharmacist_name}_{i}_am"
+                    slot_identity = _slot_identity(row)
+                    unique_key = f"{slot_identity}_{pharmacist_name}_{i}_am"
 
                     if unbook_mode:
                         if booked:
@@ -1507,7 +1756,8 @@ def display_calendar(unbook_mode=False):
                     surgery_name = row['surgery'] if booked else None
                     _render_slot_card(pharmacist_name, surgery_name=surgery_name, available_slot=True)
                     btn_label = "13:15 - 17:00"
-                    unique_key = f"{row['unique_code']}_{pharmacist_name}_{i}_pm"
+                    slot_identity = _slot_identity(row)
+                    unique_key = f"{slot_identity}_{pharmacist_name}_{i}_pm"
 
                     if unbook_mode:
                         if booked:
@@ -1573,7 +1823,9 @@ def display_calendar(unbook_mode=False):
         current_date_beyond += timedelta(days=1)
 
 if __name__ == "__main__":
-    display_calendar()
+    authenticated_user = _require_authenticated_user()
+    if authenticated_user:
+        display_calendar(authenticated_user)
 
     st.sidebar.html(
         """

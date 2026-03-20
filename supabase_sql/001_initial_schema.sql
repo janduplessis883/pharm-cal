@@ -36,26 +36,51 @@ before update on public.pharmacists
 for each row
 execute function public.set_updated_at();
 
-create table if not exists public.users (
+create table if not exists public.surgeries (
     id uuid primary key default gen_random_uuid(),
-    surgery text not null,
-    email text not null,
-    name text,
     list_size integer,
+    surgery_name text not null,
+    user_ids uuid[] not null default '{}'::uuid[],
     created_at timestamptz not null default timezone('utc', now()),
     updated_at timestamptz not null default timezone('utc', now()),
-    constraint users_surgery_not_blank check (btrim(surgery) <> ''),
-    constraint users_email_not_blank check (btrim(email) <> ''),
-    constraint users_list_size_non_negative check (list_size is null or list_size >= 0)
+    constraint surgeries_surgery_name_not_blank check (btrim(surgery_name) <> ''),
+    constraint surgeries_list_size_non_negative check (list_size is null or list_size >= 0)
 );
 
-create unique index if not exists users_surgery_email_lower_key
-    on public.users (lower(surgery), lower(email));
+create unique index if not exists surgeries_surgery_name_lower_key
+    on public.surgeries (lower(surgery_name));
 
-create index if not exists users_surgery_lower_idx
-    on public.users (lower(surgery));
+comment on table public.surgeries is 'Imported from PharmaCal - Surgeries.csv. Stores one row per surgery plus its related user ids.';
 
-comment on table public.users is 'Imported from PharmaCal - Users.csv. This stores surgery contacts, not Supabase Auth users.';
+drop trigger if exists set_surgeries_updated_at on public.surgeries;
+create trigger set_surgeries_updated_at
+before update on public.surgeries
+for each row
+execute function public.set_updated_at();
+
+create table if not exists public.users (
+    id uuid primary key default gen_random_uuid(),
+    name text not null,
+    email text not null,
+    surgery_id uuid not null references public.surgeries(id) on update cascade on delete cascade,
+    role text not null default 'member',
+    created_at timestamptz not null default timezone('utc', now()),
+    updated_at timestamptz not null default timezone('utc', now()),
+    constraint users_name_not_blank check (btrim(name) <> ''),
+    constraint users_email_not_blank check (btrim(email) <> ''),
+    constraint users_role_not_blank check (btrim(role) <> '')
+);
+
+create unique index if not exists users_email_lower_key
+    on public.users (lower(email));
+
+create index if not exists users_surgery_id_idx
+    on public.users (surgery_id);
+
+create index if not exists users_role_lower_idx
+    on public.users (lower(role));
+
+comment on table public.users is 'Stores surgery users and contacts. Each user belongs to one surgery.';
 
 drop trigger if exists set_users_updated_at on public.users;
 create trigger set_users_updated_at
