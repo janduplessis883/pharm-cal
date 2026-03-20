@@ -24,26 +24,11 @@ from core import (
     update_booking,
     accept_cover_request,
     reject_cover_request,
+    delete_cover_request,
     save_availability_change,
     sign_in_with_email_password,
     sign_out_authenticated_user,
 )
-
-
-def _get_admin_password() -> str:
-    direct_value = st.secrets.get("admin_password")
-    if direct_value is not None:
-        return str(direct_value)
-
-    supabase_section = st.secrets.get("supabase")
-    if supabase_section:
-        nested_value = supabase_section.get("admin_password")
-        if nested_value is not None:
-            return str(nested_value)
-
-    return ""
-
-
 st.set_page_config(
     page_title="Pharm-Cal [Brompton Health PCN]",
     layout="centered",
@@ -924,6 +909,14 @@ def _render_sidebar_request_action(request: pd.Series, key_prefix: str) -> None:
     request_uuid = str(request.get("uuid", "") or "").strip()
     request_status = str(request.get("status", "") or "Pending").strip()
     requester_email = str(request.get("requester_email", "") or "").strip()
+    requester_user_id = str(request.get("requester_user_id", "") or "").strip()
+    current_user_id = str(_authenticated_user().get("app_user_id", "") or "").strip()
+    can_delete_own_request = (
+        bool(current_user_id)
+        and requester_user_id == current_user_id
+        and request_status.casefold() == "pending"
+    )
+    send_rejection_emails = bool(st.session_state.get("sidebar_send_rejection_emails", False))
 
     if request_status.casefold() == "approved":
         st.caption("Approved")
@@ -933,12 +926,26 @@ def _render_sidebar_request_action(request: pd.Series, key_prefix: str) -> None:
         st.caption("Rejected")
         return
 
-    if not requester_email:
+    if not requester_email and not can_delete_own_request:
         st.caption("Requester email missing")
         return
 
     if not request_uuid:
         st.caption("Request ID missing")
+        return
+
+    if can_delete_own_request and not _current_user_can_access_all_clinics():
+        if st.button(
+            "Delete Request",
+            key=f"{key_prefix}_delete_{request_uuid}",
+            type="secondary",
+            icon=":material/delete:",
+            width="stretch",
+            help="Delete a pending request that you created.",
+        ):
+            if delete_cover_request(request_uuid, current_user_id):
+                time.sleep(0.3)
+                st.rerun()
         return
 
     reject_col, accept_col = st.columns(2)
@@ -960,9 +967,9 @@ def _render_sidebar_request_action(request: pd.Series, key_prefix: str) -> None:
         type="secondary",
         icon=":material/cancel:",
         width="stretch",
-        help="Reject this future cover request and notify the requester.",
+        help="Reject this future cover request and optionally notify the requester, based on the sidebar toggle.",
     ):
-        if reject_cover_request(request_uuid):
+        if reject_cover_request(request_uuid, send_email=send_rejection_emails):
             time.sleep(0.3)
             st.rerun()
 
@@ -1012,6 +1019,12 @@ def _render_future_requests_board(future_requests: pd.DataFrame, *, sidebar: boo
             on_click=_toggle_sidebar_request_expanders,
             type="secondary",
             icon=":material/expand_content:",
+        )
+        st.sidebar.toggle(
+            "Send rejection emails",
+            key="sidebar_send_rejection_emails",
+            value=st.session_state.get("sidebar_send_rejection_emails", False),
+            help="When on, rejecting a future request sends an email to the requester. When off, the request is only marked as rejected.",
         )
 
         for index, (cover_date, daily_requests) in enumerate(grouped_requests):
@@ -1330,7 +1343,16 @@ def show_admin_panel(df):
             st.sidebar.info("No pharmacists saved yet.")
     elif admin_tab == "Surgery Session Plots":
         _render_section_header("Surgery Session Plots", eyebrow="Analytics", copy="Switch between activity views using a single control.", sidebar=True)
-        st.session_state.plot_type = st.sidebar.radio("Select Plot Type", ["Absolute Session Plot", "Normalized Sessions per 1000 pts", "Monthly Sessions"], width="stretch")
+        st.session_state.plot_type = st.sidebar.radio(
+            "Select Plot Type",
+            [
+                "Absolute Session Plot",
+                "Normalized Sessions per 1000 pts",
+                "Monthly Session Share (%)",
+                "Future Request Approval/Rejection Rates",
+            ],
+            width="stretch",
+        )
     elif admin_tab == "View Future Requests":
         _render_section_header("Future Cover Requests", eyebrow="Requests", copy="Keep requests visible here while booking against the live calendar.", sidebar=True)
         get_cover_requests_data.clear()
@@ -1598,12 +1620,8 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
             st.session_state.pop("auth_user", None)
             st.rerun()
 
-    # --- Admin Sidebar ---
-
-    password = st.sidebar.text_input("Admin password", type="password", placeholder="Admin Login", label_visibility="collapsed", icon=":material/settings:")  # Admin password input
-    configured_admin_password = _get_admin_password()
-    is_admin = bool(configured_admin_password) and password == configured_admin_password
-    if password == '':
+    is_superuser = _current_user_can_access_all_clinics()
+    if not is_superuser:
         st.sidebar.image('images/logo22.png')
     df = _normalize_schedule_data(get_schedule_data())
 
@@ -1632,14 +1650,14 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
         default_end=min(default_end_date, slider_max_date),
     )
 
-    if is_admin:
+    if is_superuser:
         unbook_mode = show_admin_panel(df)
-    elif password != "" and configured_admin_password:
-        st.sidebar.error("Incorrect password")
+    else:
+        st.session_state.view = 'calendar'
 
     # Display content based on the selected view
     if st.session_state.view == 'plot':
-        display_plot(df, get_surgeries_data) # Pass get_surgeries_data as an argument
+        display_plot(df, get_surgeries_data, get_cover_requests_data) # Pass supporting data getters for analytics
         return
 
     # --- Main Calendar Display ---
@@ -1655,7 +1673,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
     )
     _render_authenticated_greeting(auth_user)
 
-    if is_admin and st.session_state.get("admin_options_radio") == "View Future Requests":
+    if is_superuser and st.session_state.get("admin_options_radio") == "View Future Requests":
         _render_section_band(
             "Review And Book",
             eyebrow="Admin Workflow",
@@ -1811,10 +1829,31 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
             if not daily_cover_requests.empty:
                 public_request_columns = st.columns(2)
                 for idx, (_, req_row) in enumerate(daily_cover_requests.iterrows()):
-                    public_request_columns[idx % 2].markdown(
-                        _future_request_public_card_markup(req_row),
-                        unsafe_allow_html=True,
-                    )
+                    with public_request_columns[idx % 2]:
+                        st.markdown(
+                            _future_request_public_card_markup(req_row),
+                            unsafe_allow_html=True,
+                        )
+                        request_uuid = str(req_row.get("uuid", "") or "").strip()
+                        requester_user_id = str(req_row.get("requester_user_id", "") or "").strip()
+                        current_user_id = str(_authenticated_user().get("app_user_id", "") or "").strip()
+                        request_status = str(req_row.get("status", "") or "Pending").strip().casefold()
+                        if (
+                            request_uuid
+                            and current_user_id
+                            and requester_user_id == current_user_id
+                            and request_status == "pending"
+                        ):
+                            if st.button(
+                                "Delete Request",
+                                key=f"delete_public_request_{request_uuid}",
+                                type="secondary",
+                                icon=":material/delete:",
+                                width="stretch",
+                            ):
+                                if delete_cover_request(request_uuid, current_user_id):
+                                    time.sleep(0.2)
+                                    st.rerun()
 
             st.markdown("<div class='future-request-action-gap'></div>", unsafe_allow_html=True)
             if st.button("Request Cover", key=f"interest_{current_date_beyond.strftime('%Y%m%d')}", icon=":material/event_upcoming:", type="primary", width="stretch"):

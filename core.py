@@ -566,6 +566,32 @@ def add_cover_request_data(
         st.error(f"An error occurred while adding the cover request: {e}")
 
 
+def delete_cover_request(request_uuid: str, requester_user_id: str) -> bool:
+    try:
+        request_row = _get_cover_request_by_uuid(request_uuid)
+        if not request_row:
+            st.error("Could not find the cover request to delete.")
+            return False
+
+        owner_id = str(request_row.get("requester_user_id") or "").strip()
+        if not owner_id or owner_id != str(requester_user_id).strip():
+            st.error("You can only delete requests that you created.")
+            return False
+
+        current_status = _normalized(request_row.get("status"))
+        if current_status in {"approved", "rejected"}:
+            st.error("Only pending requests can be deleted.")
+            return False
+
+        supabase.table("cover_requests").delete().eq("uuid", request_uuid).execute()
+        get_cover_requests_data.clear()
+        st.success("Future cover request deleted.")
+        return True
+    except Exception as e:
+        st.error(f"An error occurred while deleting the cover request: {e}")
+        return False
+
+
 def _get_cover_request_by_uuid(request_uuid: str) -> dict[str, Any] | None:
     response = (
         supabase.table("cover_requests")
@@ -608,7 +634,7 @@ def accept_cover_request(request_uuid: str) -> bool:
         return False
 
 
-def reject_cover_request(request_uuid: str) -> bool:
+def reject_cover_request(request_uuid: str, *, send_email: bool = True) -> bool:
     try:
         request_row = _get_cover_request_by_uuid(request_uuid)
         if not request_row:
@@ -627,23 +653,24 @@ def reject_cover_request(request_uuid: str) -> bool:
         cover_date = pd.to_datetime(request_row.get("cover_date"), errors="coerce")
         cover_date_str = cover_date.strftime("%A, %d %B %Y") if pd.notna(cover_date) else "the requested date"
 
-        if not requester_email:
-            st.error("This request does not include a requester email, so a rejection email cannot be sent.")
-            return False
+        if send_email:
+            if not requester_email:
+                st.error("This request does not include a requester email, so a rejection email cannot be sent.")
+                return False
 
-        rejection_html = f"""
-        <p>Dear {requester_name},</p>
-        <p>Thank you for your request for pharmacy support for <b>{surgery_name}</b> on <b>{cover_date_str}</b>.</p>
-        <p>We are sorry to let you know that we have been unable to accommodate this request due to current scheduling constraints. Session requests are prioritised according to operational need and availability.</p>
-        <p>We appreciate your understanding and apologise that we could not support this request on this occasion.</p>
-        <p>Kind regards,<br>Pharma-Cal automated notifications<br>Brompton Health PCN</p>
-        """
-        if not send_resend_email(
-            requester_email,
-            f"Parmacist Cover Request Rejected - {cover_date_str}",
-            rejection_html,
-        ):
-            return False
+            rejection_html = f"""
+            <p>Dear {requester_name},</p>
+            <p>Thank you for your request for pharmacy support for <b>{surgery_name}</b> on <b>{cover_date_str}</b>.</p>
+            <p>We are sorry to let you know that we have been unable to accommodate this request due to current scheduling constraints. Session requests are prioritised according to operational need and availability.</p>
+            <p>We appreciate your understanding and apologise that we could not support this request on this occasion.</p>
+            <p>Kind regards,<br>Pharma-Cal automated notifications<br>Brompton Health PCN</p>
+            """
+            if not send_resend_email(
+                requester_email,
+                f"Parmacist Cover Request Rejected - {cover_date_str}",
+                rejection_html,
+            ):
+                return False
 
         supabase.table("cover_requests").update(
             {
@@ -653,7 +680,10 @@ def reject_cover_request(request_uuid: str) -> bool:
         ).eq("uuid", request_uuid).execute()
 
         get_cover_requests_data.clear()
-        st.success(f"Rejection email sent to {requester_name} and request marked as rejected.")
+        if send_email:
+            st.success(f"Rejection email sent to {requester_name} and request marked as rejected.")
+        else:
+            st.success("Request marked as rejected.")
         return True
     except Exception as e:
         st.error(f"An error occurred while rejecting the cover request: {e}")
