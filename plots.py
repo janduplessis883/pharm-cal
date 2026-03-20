@@ -83,8 +83,15 @@ def _build_future_request_rates_df(cover_requests_df: pd.DataFrame) -> pd.DataFr
     return rates_df.sort_values("Surgery", key=lambda series: series.str.casefold())
 
 
-def display_plot(df, get_surgeries_data_func, get_cover_requests_data_func=None):
-    st.subheader("Surgery Session Distribution")
+def display_plot(
+    df,
+    get_surgeries_data_func,
+    get_cover_requests_data_func=None,
+    heading: str | None = "Surgery Session Distribution",
+    key_prefix: str = "main",
+):
+    if heading:
+        st.subheader(heading)
     plot_type = st.session_state.get("plot_type", "Absolute Session Plot")
 
     if plot_type == "Future Request Approval/Rejection Rates":
@@ -109,13 +116,13 @@ def display_plot(df, get_surgeries_data_func, get_cover_requests_data_func=None)
             x="Surgery",
             y="Rate",
             color="Outcome",
-            barmode="group",
+            barmode="stack",
             custom_data=["total_requests"],
-            title="Future Request Approval And Rejection Rates by Surgery",
+            title="Future Request Outcomes by Surgery (100% Stacked)",
             template="plotly_white",
             color_discrete_map={
-                "Approval Rate": "#15803d",
-                "Rejection Rate": "#b91c1c",
+                "Approval Rate": "#749857",
+                "Rejection Rate": "#ae4f4d",
                 "Pending Rate": "#e78531",
             },
         )
@@ -128,8 +135,9 @@ def display_plot(df, get_surgeries_data_func, get_cover_requests_data_func=None)
             xaxis_tickangle=-45,
             legend_title_text="Outcome",
         )
+        fig2.update_yaxes(range=[0, 100], ticksuffix="%")
         st.caption("Rates are calculated from all future requests for each surgery, including pending requests in the denominator.")
-        st.plotly_chart(fig2, width="stretch", key="future_request_rates_plot")
+        st.plotly_chart(fig2, width="stretch", key=f"{key_prefix}_future_request_rates_plot")
         return
 
     # Ensure the DataFrame is not empty and contains required columns
@@ -228,8 +236,8 @@ def display_plot(df, get_surgeries_data_func, get_cover_requests_data_func=None)
             x='Month',
             y='Session Share (%)',
             color='surgery',
-            barmode='group',
-            title='Monthly Percentage Of Sessions Assigned To Each Surgery',
+            barmode='stack',
+            title='Monthly Session Share By Surgery (100% Stacked)',
             labels={
                 'Month': 'Month',
                 'Session Share (%)': 'Share of Monthly Sessions (%)',
@@ -252,10 +260,11 @@ def display_plot(df, get_surgeries_data_func, get_cover_requests_data_func=None)
             height=420,
         )
         fig2.update_xaxes(type='category')
+        fig2.update_yaxes(range=[0, 100], ticksuffix="%")
 
-    st.plotly_chart(fig2, width="stretch", key="surgery_plot")
+    st.plotly_chart(fig2, width="stretch", key=f"{key_prefix}_surgery_plot")
 
-def display_normalized_sessions_plot(get_schedule_data_func, get_surgeries_data_func):
+def display_normalized_sessions_plot(get_schedule_data_func, get_surgeries_data_func, key_prefix: str = "main"):
     df = get_schedule_data_func()
     plot_df = df[df['surgery'].notna() & (df['surgery'] != '')].copy()
     surgery_counts = plot_df['surgery'].value_counts().reset_index()
@@ -301,4 +310,4 @@ def display_normalized_sessions_plot(get_schedule_data_func, get_surgeries_data_
         annotation_text=f"Mean: {mean_sessions:.2f}",
         annotation_position="top right"
     )
-    st.plotly_chart(fig, width="stretch", key="user_plot")
+    st.plotly_chart(fig, width="stretch", key=f"{key_prefix}_user_plot")

@@ -194,6 +194,14 @@ def _authenticated_user() -> dict[str, str]:
     return st.session_state.get("auth_user", {}) or {}
 
 
+def _current_user_account_type() -> str:
+    return str(_authenticated_user().get("account_type", "user") or "user").strip().casefold()
+
+
+def _current_user_is_pharmacist() -> bool:
+    return _current_user_account_type() == "pharmacist"
+
+
 def _current_user_can_access_all_clinics() -> bool:
     return str(_authenticated_user().get("app_role", "") or "").strip() in FULL_ACCESS_ROLES
 
@@ -668,7 +676,7 @@ def _render_login_screen() -> bool:
         <div class="app-hero">
             <div class="app-hero-kicker">Brompton Health PCN</div>
             <div class="app-hero-title">Sign in to Pharm-Cal</div>
-            <div class="app-hero-copy">Use your Supabase email and password to open the booking calendar.</div>
+            <div class="app-hero-copy">Use your Supabase email and password to open the booking calendar. Surgery users and pharmacists can both sign in here.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -685,6 +693,7 @@ def _render_login_screen() -> bool:
             return False
         try:
             st.session_state.auth_user = sign_in_with_email_password(email, password)
+            st.session_state["sidebar_collapsed_after_login"] = False
             st.success("Signed in successfully.")
             time.sleep(0.2)
             st.rerun()
@@ -701,6 +710,38 @@ def _require_authenticated_user() -> dict[str, str] | None:
 
     _render_login_screen()
     return None
+
+
+def _collapse_sidebar_on_authenticated_entry() -> None:
+    if st.session_state.get("sidebar_collapsed_after_login", False):
+        return
+
+    st.html(
+        """
+        <script>
+        (() => {
+            const collapseSidebar = () => {
+                const doc = window.parent.document;
+                const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                if (!sidebar || sidebar.getAttribute('aria-expanded') !== 'true') {
+                    return;
+                }
+
+                const toggleButton =
+                    doc.querySelector('button[aria-label="Close sidebar"]') ||
+                    doc.querySelector('button[kind="header"][aria-expanded="true"]');
+
+                if (toggleButton) {
+                    toggleButton.click();
+                }
+            };
+
+            window.setTimeout(collapseSidebar, 0);
+        })();
+        </script>
+        """
+    )
+    st.session_state["sidebar_collapsed_after_login"] = True
 
 
 def _render_slot_card(
@@ -1385,6 +1426,10 @@ def show_admin_panel(df):
 
 @st.dialog("Booking Details")
 def show_booking_dialog(slot):
+    if _current_user_is_pharmacist():
+        st.info("Pharmacist accounts have view-only access and cannot create surgery bookings.")
+        return
+
     shift = slot['am_pm'].upper()
     pharmacist_name = slot.get('pharmacist_name', 'Pharmacist') # Default to 'Pharmacist' if name is not available
     slot_key = _slot_identity(slot)
@@ -1472,6 +1517,10 @@ def show_booking_dialog(slot):
 
 @st.dialog("Request Cover")
 def show_cover_request_dialog(cover_date):
+    if _current_user_is_pharmacist():
+        st.info("Future cover requests can only be submitted by surgery contacts.")
+        return
+
     st.markdown(f"Requesting cover for: **{cover_date.strftime('%A, %d %B %Y')}**")
 
     users_df = get_users_data()
@@ -1586,22 +1635,35 @@ def show_cover_request_dialog(cover_date):
 
 def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
     _apply_app_theme()
+    _collapse_sidebar_on_authenticated_entry()
+    raw_schedule_data = get_schedule_data()
+    df = _normalize_schedule_data(raw_schedule_data)
+    is_pharmacist_account = str(auth_user.get("account_type", "") or "").strip().casefold() == "pharmacist"
+    can_book_slots = not is_pharmacist_account
+    can_submit_future_requests = not is_pharmacist_account
+
+    def _render_top_plot(plot_type: str, key_prefix: str) -> None:
+        previous_plot_type = st.session_state.get("plot_type", "Absolute Session Plot")
+        st.session_state.plot_type = plot_type
+        try:
+            display_plot(df, get_surgeries_data, get_cover_requests_data, heading=None, key_prefix=key_prefix)
+        finally:
+            st.session_state.plot_type = previous_plot_type
+
     c1, c2, c3 = st.columns([0.25, 0.25, 2], gap="small")
     with c1:
         with st.popover(':material/info:'):
-            st.image('images/userguide.png')
-    with c3:
-        with st.popover(':material/event:'):
-            st.markdown(':material/event_available: 2025 **Fair Share**')
-            release = pd.read_csv('data/fairshare.csv')
             with st.container(width=700):
-                st.dataframe(release, width=800, height=700, hide_index=True)
+                _render_top_plot("Future Request Approval/Rejection Rates", "popover_future")
     with c2:
+        with st.popover(':material/event:'):
+            with st.container(width=700):
+                _render_top_plot("Monthly Session Share (%)", "popover_monthly")
+    with c3:
         with st.popover(':material/bar_chart:'):
             with st.container(width=700):
-                schedule_data = get_schedule_data()
-                if 'surgery' in schedule_data.columns:
-                    display_normalized_sessions_plot(lambda: schedule_data, get_surgeries_data)
+                if 'surgery' in raw_schedule_data.columns:
+                    display_normalized_sessions_plot(lambda: raw_schedule_data, get_surgeries_data, key_prefix="popover_normalized")
                 else:
                     st.warning("No surgery data to display.")
 
@@ -1618,12 +1680,12 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
             except Exception:
                 pass
             st.session_state.pop("auth_user", None)
+            st.session_state.pop("sidebar_collapsed_after_login", None)
             st.rerun()
 
     is_superuser = _current_user_can_access_all_clinics()
     if not is_superuser:
         st.sidebar.image('images/logo22.png')
-    df = _normalize_schedule_data(get_schedule_data())
 
     today = datetime.today().date()
     yesterday = today - timedelta(days=1)
@@ -1657,7 +1719,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
 
     # Display content based on the selected view
     if st.session_state.view == 'plot':
-        display_plot(df, get_surgeries_data, get_cover_requests_data) # Pass supporting data getters for analytics
+        display_plot(df, get_surgeries_data, get_cover_requests_data, key_prefix="main") # Pass supporting data getters for analytics
         return
 
     # --- Main Calendar Display ---
@@ -1672,6 +1734,8 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
         unsafe_allow_html=True,
     )
     _render_authenticated_greeting(auth_user)
+    if is_pharmacist_account:
+        st.info("You are signed in as a pharmacist. This view is read-only, so you can review the rota without creating bookings or cover requests.")
 
     if is_superuser and st.session_state.get("admin_options_radio") == "View Future Requests":
         _render_section_band(
@@ -1754,7 +1818,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                         if booked:
                             st.button(btn_label + " (Booked)", key=unique_key, disabled=True, width="stretch")
                         else:
-                            if st.button(btn_label, key=unique_key, type="primary", width="stretch"):
+                            if st.button(btn_label, key=unique_key, type="primary", width="stretch", disabled=not can_book_slots):
                                 show_booking_dialog(row.to_dict())
                 else:
                     _render_slot_card(None, available_slot=False)
@@ -1787,7 +1851,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                         if booked:
                             st.button(btn_label + " (Booked)", key=unique_key, disabled=True, width="stretch")
                         else:
-                            if st.button(btn_label, key=unique_key, type="primary", width="stretch"):
+                            if st.button(btn_label, key=unique_key, type="primary", width="stretch", disabled=not can_book_slots):
                                 show_booking_dialog(row.to_dict())
                 else:
                     _render_slot_card(None, available_slot=False)
@@ -1856,7 +1920,14 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                                     st.rerun()
 
             st.markdown("<div class='future-request-action-gap'></div>", unsafe_allow_html=True)
-            if st.button("Request Cover", key=f"interest_{current_date_beyond.strftime('%Y%m%d')}", icon=":material/event_upcoming:", type="primary", width="stretch"):
+            if st.button(
+                "Request Cover",
+                key=f"interest_{current_date_beyond.strftime('%Y%m%d')}",
+                icon=":material/event_upcoming:",
+                type="primary",
+                width="stretch",
+                disabled=not can_submit_future_requests,
+            ):
                 show_cover_request_dialog(current_date_beyond)
             st.divider()
         current_date_beyond += timedelta(days=1)

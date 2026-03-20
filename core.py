@@ -145,21 +145,43 @@ supabase = get_supabase_client()
 def _build_authenticated_user_payload(user: Any) -> dict[str, Any]:
     user_email = str(getattr(user, "email", "") or "").strip()
     app_user = _get_user_by_email(user_email)
-    if not app_user:
-        raise ValueError("This Supabase account is not linked to an application user record.")
+    pharmacist = _get_pharmacist_by_email(user_email)
+    if not app_user and not pharmacist:
+        raise ValueError("This Supabase account is not linked to a surgery user or pharmacist record.")
 
     user_metadata = getattr(user, "user_metadata", {}) or {}
     full_name = str(user_metadata.get("full_name") or user_metadata.get("name") or "").strip()
-    display_name = full_name or str(app_user.get("name") or "").strip() or user_email or "there"
+    linked_name = (
+        str((app_user or {}).get("name") or "").strip()
+        or str((pharmacist or {}).get("name") or "").strip()
+    )
+    display_name = full_name or linked_name or user_email or "there"
+
+    if pharmacist and not app_user:
+        return {
+            "id": str(getattr(user, "id", "") or "").strip(),
+            "email": user_email,
+            "display_name": display_name,
+            "account_type": "pharmacist",
+            "app_user_id": "",
+            "app_role": "pharmacist",
+            "surgery_id": "",
+            "surgery": "",
+            "name": str(pharmacist.get("name") or "").strip(),
+            "pharmacist_id": str(pharmacist.get("id") or "").strip(),
+        }
+
     return {
         "id": str(getattr(user, "id", "") or "").strip(),
         "email": user_email,
         "display_name": display_name,
+        "account_type": "user",
         "app_user_id": str(app_user.get("id") or "").strip(),
         "app_role": str(app_user.get("role") or "").strip(),
         "surgery_id": str(app_user.get("surgery_id") or "").strip(),
         "surgery": str(app_user.get("surgery") or "").strip(),
         "name": str(app_user.get("name") or "").strip(),
+        "pharmacist_id": "",
     }
 
 
@@ -394,6 +416,18 @@ def _get_pharmacist_by_id(pharmacist_id: str) -> dict[str, Any] | None:
         supabase.table("pharmacists")
         .select("id, name, email")
         .eq("id", pharmacist_id)
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def _get_pharmacist_by_email(email: str) -> dict[str, Any] | None:
+    response = (
+        supabase.table("pharmacists")
+        .select("id, name, email")
+        .ilike("email", email.strip())
         .limit(1)
         .execute()
     )
