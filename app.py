@@ -210,6 +210,10 @@ def _current_user_surgery_id() -> str:
     return str(_authenticated_user().get("surgery_id", "") or "").strip()
 
 
+def _current_user_app_user_id() -> str:
+    return str(_authenticated_user().get("app_user_id", "") or "").strip()
+
+
 def _normalize_schedule_data(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -389,6 +393,11 @@ def _apply_app_theme() -> None:
             padding: 0.65rem 0.85rem 0.72rem;
         }
 
+        .slot-card--available {
+            background: #FBF6EA;
+            border-color: #d8662a;
+        }
+
         .slot-card-placeholder {
             margin-bottom: 0.65rem;
             min-height: 7.1rem;
@@ -479,13 +488,16 @@ def _apply_app_theme() -> None:
         }
 
         .request-card {
-            background: #ffffff;
-            border: 1px solid var(--app-border);
-            border-radius: 18px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
-            padding: 1rem 1rem 0.95rem;
-            min-height: 100%;
-            margin-bottom: 0.9rem;
+            background: #f8f8f8;
+            border: 1px solid #828282;
+            border-radius: 16px;
+            box-shadow: 0 10px 24px rgba(79, 116, 139, 0.14);
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            margin-bottom: 0.65rem;
+            min-height: 7.1rem;
+            padding: 0.65rem 0.85rem 0.72rem;
         }
 
         .request-card-top {
@@ -566,13 +578,16 @@ def _apply_app_theme() -> None:
         }
 
         .public-request-card {
-            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
-            border: 1px solid #dbe4ee;
+            background: #f8f8f8;
+            border: 1px solid #828282;
             border-radius: 16px;
-            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
-            margin: 0.2rem 0.15rem 1rem;
-            padding: 0.85rem 0.9rem;
-            min-height: 100%;
+            box-shadow: 0 10px 24px rgba(79, 116, 139, 0.14);
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            margin: 0.2rem 0.15rem 0.65rem;
+            min-height: 7.1rem;
+            padding: 0.65rem 0.85rem 0.72rem;
         }
 
         .public-request-card-title {
@@ -749,6 +764,7 @@ def _render_slot_card(
     *,
     surgery_name: str | None = None,
     available_slot: bool,
+    is_booked: bool = False,
 ) -> None:
     cleaned_name = str(pharmacist_name or "").strip()
     cleaned_surgery = str(surgery_name or "").strip()
@@ -760,11 +776,11 @@ def _render_slot_card(
     if cleaned_name and cleaned_name != "None":
         name = cleaned_name
         name_class = "slot-card-name slot-card-name--allocated"
-        card_class = "slot-card"
+        card_class = "slot-card" if is_booked else "slot-card slot-card--available"
     elif available_slot:
         name = "Open slot"
         name_class = "slot-card-name"
-        card_class = "slot-card"
+        card_class = "slot-card slot-card--available"
 
     surgery_html = (
         f"<div class='slot-card-surgery'>Surgery: <span class='slot-card-surgery-name'>{escape(cleaned_surgery)}</span></div>"
@@ -1093,6 +1109,7 @@ def _render_future_requests_board(future_requests: pd.DataFrame, *, sidebar: boo
                 expanded=st.session_state.get(expander_key, index < 2),
                 key=expander_key,
                 on_change=_sync_sidebar_request_expanders,
+                icon=":material/schedule:"
             ):
                 st.caption(f"{pending_today} pending review")
                 for _, request in daily_requests.iterrows():
@@ -1134,14 +1151,14 @@ def show_admin_panel(df):
     df = _normalize_schedule_data(df)
     unbook_mode = False  # Default value
     _render_section_header("Admin Options", eyebrow="Workspace", copy="Manage scheduling, directory data, and analytics.", sidebar=True)
-    admin_tab = st.sidebar.radio("Admin Options", ["Manage Availability", "View Future Requests", "Manage Surgeries", "Manage Users", "Manage Pharmacists", "Surgery Session Plots"], key="admin_options_radio", width="stretch")
+    admin_tab = st.sidebar.radio("Admin Options", [":material/event_available: Manage Availability", ":material/schedule: View Future Requests", "Manage Surgeries", "Manage Users", "Manage Pharmacists", "Surgery Session Plots"], key="admin_options_radio", width="stretch")
 
     if admin_tab == "Surgery Session Plots":
         st.session_state.view = 'plot'
     else:
         st.session_state.view = 'calendar'
 
-    if admin_tab == "Manage Availability":
+    if admin_tab == ":material/event_available: Manage Availability":
         _render_section_header("Manage Availability", eyebrow="Scheduling", copy="Assign pharmacist availability and protect booked slots.", sidebar=True)
         unbook_mode = st.sidebar.toggle(":material/person_cancel: **Cancel Bookings**", value=False, width="stretch")
 
@@ -1410,7 +1427,7 @@ def show_admin_panel(df):
             ],
             width="stretch",
         )
-    elif admin_tab == "View Future Requests":
+    elif admin_tab == ":material/schedule: View Future Requests":
         _render_section_header("Future Cover Requests", eyebrow="Requests", copy="Keep requests visible here while booking against the live calendar.", sidebar=True)
         get_cover_requests_data.clear()
         cover_requests_df = get_cover_requests_data()
@@ -1459,6 +1476,10 @@ def show_booking_dialog(slot):
 
     allow_all_clinics = _current_user_can_access_all_clinics()
     current_surgery_id = _current_user_surgery_id()
+    current_user = _authenticated_user()
+    current_user_app_user_id = str(current_user.get("app_user_id", "") or "").strip()
+    current_user_name = str(current_user.get("name", "") or "").strip()
+    current_user_email = str(current_user.get("email", "") or "").strip()
     if not allow_all_clinics and current_surgery_id:
         surgeries_df = surgeries_df[surgeries_df["id"].astype(str) == current_surgery_id].copy()
 
@@ -1468,13 +1489,23 @@ def show_booking_dialog(slot):
         surgery_name = str(row.get("surgery", "") or "").strip()
         if not surgery_id or not surgery_name:
             continue
-        primary_user_id = str(row.get("primary_user_id", "") or "").strip()
-        primary_user_name = str(row.get("primary_user_name", "") or "").strip()
-        primary_user_email = str(row.get("primary_user_email", "") or "").strip()
+        selected_user_id = str(row.get("primary_user_id", "") or "").strip()
+        selected_user_name = str(row.get("primary_user_name", "") or "").strip()
+        selected_user_email = str(row.get("primary_user_email", "") or "").strip()
+
+        if (
+            not allow_all_clinics
+            and surgery_id == current_surgery_id
+            and current_user_app_user_id
+        ):
+            selected_user_id = current_user_app_user_id
+            selected_user_name = current_user_name
+            selected_user_email = current_user_email
+
         if allow_all_clinics:
             label = (
-                f"{surgery_name} ({primary_user_email})"
-                if primary_user_email
+                f"{surgery_name} ({selected_user_email})"
+                if selected_user_email
                 else f"{surgery_name} (No linked user)"
             )
         else:
@@ -1484,9 +1515,9 @@ def show_booking_dialog(slot):
                 "id": surgery_id,
                 "label": label,
                 "surgery": surgery_name,
-                "primary_user_id": primary_user_id,
-                "primary_user_name": primary_user_name,
-                "primary_user_email": primary_user_email,
+                "primary_user_id": selected_user_id,
+                "primary_user_name": selected_user_name,
+                "primary_user_email": selected_user_email,
             }
         )
 
@@ -1542,6 +1573,7 @@ def show_cover_request_dialog(cover_date):
     users_df = get_users_data()
     allow_all_clinics = _current_user_can_access_all_clinics()
     current_surgery_id = _current_user_surgery_id()
+    current_user_app_user_id = _current_user_app_user_id()
     if not allow_all_clinics and current_surgery_id:
         users_df = users_df[users_df["surgery_id"].astype(str) == current_surgery_id].copy()
     surgery_options = _build_user_options(users_df)
@@ -1556,13 +1588,25 @@ def show_cover_request_dialog(cover_date):
     prefill_source_key = f"cover_prefill_source_{date_key}"
 
     available_labels = [option["label"] for option in surgery_options]
-    default_index = 0
+    selected_option_index = 0
+    if current_user_app_user_id:
+        matched_index = next(
+            (
+                index
+                for index, option in enumerate(surgery_options)
+                if str(option.get("id", "") or "").strip() == current_user_app_user_id
+            ),
+            None,
+        )
+        if matched_index is not None:
+            selected_option_index = matched_index
+
     if not allow_all_clinics and available_labels:
         selected_surgery = st.selectbox(
             "Select Surgery",
             available_labels,
             key=surgery_key,
-            index=0,
+            index=selected_option_index,
             disabled=True,
         )
     else:
@@ -1570,7 +1614,7 @@ def show_cover_request_dialog(cover_date):
             "Select Surgery",
             [""] + available_labels,
             key=surgery_key,
-            index=default_index,
+            index=selected_option_index + 1 if available_labels else 0,
         )
     selected_option = next((option for option in surgery_options if option["label"] == selected_surgery), None)
     prefilled_name = selected_option["name"] if selected_option else ""
@@ -1819,7 +1863,12 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                     pharmacist_name = row['pharmacist_name']
                     booked = str(row['booked']).upper() == "TRUE"
                     surgery_name = row['surgery'] if booked else None
-                    _render_slot_card(pharmacist_name, surgery_name=surgery_name, available_slot=True)
+                    _render_slot_card(
+                        pharmacist_name,
+                        surgery_name=surgery_name,
+                        available_slot=True,
+                        is_booked=booked,
+                    )
                     btn_label = "09:00 - 12:45"
                     slot_identity = _slot_identity(row)
                     unique_key = f"{slot_identity}_{pharmacist_name}_{i}_am"
@@ -1852,7 +1901,12 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                     pharmacist_name = row['pharmacist_name']
                     booked = str(row['booked']).upper() == "TRUE"
                     surgery_name = row['surgery'] if booked else None
-                    _render_slot_card(pharmacist_name, surgery_name=surgery_name, available_slot=True)
+                    _render_slot_card(
+                        pharmacist_name,
+                        surgery_name=surgery_name,
+                        available_slot=True,
+                        is_booked=booked,
+                    )
                     btn_label = "13:15 - 17:00"
                     slot_identity = _slot_identity(row)
                     unique_key = f"{slot_identity}_{pharmacist_name}_{i}_pm"
