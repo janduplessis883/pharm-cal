@@ -391,10 +391,12 @@ def _apply_app_theme() -> None:
             margin-bottom: 0.65rem;
             min-height: 7.1rem;
             padding: 0.65rem 0.85rem 0.72rem;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
         }
 
         .slot-card--available {
-            background: #FBF6EA;
+            background: #f7f1ee;
             border-color: #d8662a;
         }
 
@@ -498,6 +500,8 @@ def _apply_app_theme() -> None:
             margin-bottom: 0.65rem;
             min-height: 7.1rem;
             padding: 0.65rem 0.85rem 0.72rem;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
         }
 
         .request-card-top {
@@ -588,6 +592,17 @@ def _apply_app_theme() -> None:
             margin: 0.2rem 0.15rem 0.65rem;
             min-height: 7.1rem;
             padding: 0.65rem 0.85rem 0.72rem;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+        }
+
+        @media (hover: hover) {
+            .slot-card:hover,
+            .request-card:hover,
+            .public-request-card:hover {
+                transform: translateY(3px);
+                box-shadow: 0 4px 12px rgba(79, 116, 139, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+            }
         }
 
         .public-request-card-title {
