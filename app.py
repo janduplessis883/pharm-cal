@@ -49,6 +49,10 @@ def _normalize_column_key(value: str) -> str:
     return "".join(char for char in str(value).strip().casefold() if char.isalnum())
 
 
+def _normalize_text(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
 def _get_matching_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
     if df.empty:
         return None
@@ -210,8 +214,83 @@ def _current_user_surgery_id() -> str:
     return str(_authenticated_user().get("surgery_id", "") or "").strip()
 
 
+def _current_user_surgery_name() -> str:
+    return str(_authenticated_user().get("surgery", "") or "").strip()
+
+
 def _current_user_app_user_id() -> str:
     return str(_authenticated_user().get("app_user_id", "") or "").strip()
+
+
+def _can_toggle_surgery_calendar_view() -> bool:
+    return (
+        not _current_user_is_pharmacist()
+        and bool(_current_user_surgery_id())
+        and bool(_current_user_surgery_name())
+    )
+
+
+def _coerce_booked_flags(values: pd.Series) -> pd.Series:
+    if values.empty:
+        return pd.Series(dtype="bool")
+
+    if pd.api.types.is_bool_dtype(values):
+        return values.fillna(False)
+
+    return values.fillna(False).apply(lambda value: str(value).strip().casefold() == "true")
+
+
+def _is_booked_value(value: object) -> bool:
+    return str(value).strip().casefold() == "true"
+
+
+def _collapse_schedule_slots_for_display(
+    schedule_df: pd.DataFrame,
+    preferred_surgery_name: str = "",
+) -> pd.DataFrame:
+    required_columns = {"Date", "am_pm", "slot_index", "booked", "surgery"}
+    if schedule_df.empty or not required_columns.issubset(schedule_df.columns):
+        return schedule_df.copy()
+
+    collapsed = schedule_df.copy()
+    collapsed["_booked_flag"] = _coerce_booked_flags(collapsed["booked"])
+    normalized_preferred_surgery = _normalize_text(preferred_surgery_name)
+    if normalized_preferred_surgery:
+        collapsed["_preferred_booking_flag"] = (
+            collapsed["_booked_flag"]
+            & (
+                collapsed["surgery"].fillna("").astype(str).str.strip().str.casefold()
+                == normalized_preferred_surgery
+            )
+        )
+    else:
+        collapsed["_preferred_booking_flag"] = False
+
+    collapsed = collapsed.sort_values(
+        ["Date", "am_pm", "slot_index", "_preferred_booking_flag", "_booked_flag"],
+        ascending=[True, True, True, False, False],
+        kind="stable",
+    )
+    collapsed = collapsed.drop_duplicates(subset=["Date", "am_pm", "slot_index"], keep="first")
+    return collapsed.drop(columns=["_booked_flag", "_preferred_booking_flag"], errors="ignore")
+
+
+def _filter_schedule_for_surgery_view(
+    schedule_df: pd.DataFrame,
+    surgery_name: str,
+) -> tuple[pd.DataFrame, int]:
+    if schedule_df.empty or "booked" not in schedule_df.columns or "surgery" not in schedule_df.columns:
+        return schedule_df.copy(), 0
+
+    normalized_surgery_name = _normalize_text(surgery_name)
+    if not normalized_surgery_name:
+        return schedule_df.copy(), 0
+
+    booked_mask = _coerce_booked_flags(schedule_df["booked"])
+    owned_booking_mask = schedule_df["surgery"].fillna("").astype(str).str.strip().str.casefold() == normalized_surgery_name
+    visible_mask = (~booked_mask) | owned_booking_mask
+    hidden_count = int((booked_mask & ~owned_booking_mask).sum())
+    return schedule_df[visible_mask].copy(), hidden_count
 
 
 def _normalize_schedule_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -267,6 +346,12 @@ def _apply_app_theme() -> None:
             --app-surface: #f8fafc;
             --app-accent: #0f766e;
             --app-accent-soft: #e6fffb;
+            --hero-navy: #102a56;
+            --hero-blue: #0077b6;
+            --hero-sky: #00b4d8;
+            --hero-orange: #ff8500;
+            --hero-amber: #ff9e00;
+            --hero-sun: #ff9100;
         }
 
         .stApp .block-container {
@@ -319,17 +404,103 @@ def _apply_app_theme() -> None:
         }
 
         .app-hero {
-            background: linear-gradient(135deg, #eefaf8 0%, #f8fbfc 100%);
-            border: 1px solid #cfe3e0;
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.18) 0%, rgba(255, 158, 0, 0) 38%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.16) 0%, rgba(0, 180, 216, 0) 36%),
+                linear-gradient(140deg, rgba(255, 255, 255, 0.97) 0%, rgba(242, 248, 252, 0.98) 100%);
+            border: 1px solid rgba(16, 42, 86, 0.16);
             border-radius: 18px;
-            color: var(--app-ink);
+            color: var(--hero-navy);
             margin: 0.25rem 0 1.25rem;
+            overflow: hidden;
             padding: 1rem 1.1rem;
-            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+            position: relative;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+            box-shadow:
+                0 16px 32px rgba(16, 42, 86, 0.10),
+                inset 0 1px 0 rgba(255, 255, 255, 0.72);
+        }
+
+        .app-hero::before {
+            background: linear-gradient(90deg, var(--hero-orange) 0%, var(--hero-amber) 22%, var(--hero-sky) 58%, var(--hero-blue) 100%);
+            content: "";
+            height: 5px;
+            left: 0;
+            opacity: 0.98;
+            position: absolute;
+            right: 0;
+            top: 0;
+        }
+
+        .app-hero::after {
+            background:
+                linear-gradient(120deg, rgba(255, 255, 255, 0.22) 0%, rgba(255, 255, 255, 0) 44%),
+                linear-gradient(135deg, rgba(2, 48, 113, 0.09) 0%, rgba(2, 48, 113, 0) 58%);
+            content: "";
+            inset: 0;
+            pointer-events: none;
+            position: absolute;
+        }
+
+        .app-hero > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .app-hero--primary {
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.36) 0%, rgba(255, 158, 0, 0) 42%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.22) 0%, rgba(0, 180, 216, 0) 36%),
+                linear-gradient(135deg, #fff4e8 0%, #fffaf2 30%, #eef9fd 76%, #edf4ff 100%);
+            border-color: rgba(255, 133, 0, 0.28);
+            box-shadow:
+                0 18px 36px rgba(255, 145, 0, 0.10),
+                0 14px 32px rgba(2, 48, 94, 0.10),
+                inset 0 1px 0 rgba(255, 255, 255, 0.72);
+        }
+
+        .app-hero--primary .app-hero-kicker {
+            color: #136f84;
+        }
+
+        .app-hero--primary .app-hero-title {
+            color: #183153;
+        }
+
+        .app-hero--primary .app-hero-copy {
+            color: #556b84;
+        }
+
+        .app-hero--welcome {
+            background:
+                radial-gradient(circle at top left, rgba(0, 180, 216, 0.28) 0%, rgba(0, 180, 216, 0) 40%),
+                radial-gradient(circle at bottom right, rgba(255, 145, 0, 0.20) 0%, rgba(255, 145, 0, 0) 34%),
+                linear-gradient(135deg, #eff9ff 0%, #f6fbff 38%, #fff7ef 100%);
+            border-color: rgba(0, 119, 182, 0.24);
+            box-shadow:
+                0 18px 34px rgba(0, 119, 182, 0.12),
+                0 10px 24px rgba(16, 42, 86, 0.08),
+                inset 0 1px 0 rgba(255, 255, 255, 0.74);
+        }
+
+        .app-hero--welcome::before {
+            background: linear-gradient(90deg, #00b4d8 0%, #0096c7 34%, #0077b6 70%, #ff9100 100%);
+        }
+
+        .app-hero--welcome .app-hero-kicker {
+            color: #0a7897;
+        }
+
+        .app-hero--welcome .app-hero-title {
+            color: #1a3558;
+        }
+
+        .app-hero--welcome .app-hero-copy {
+            color: #607792;
         }
 
         .app-hero-kicker {
-            color: var(--app-accent);
             font-size: 0.74rem;
             font-weight: 700;
             letter-spacing: 0.08em;
@@ -351,15 +522,41 @@ def _apply_app_theme() -> None:
         }
 
         .app-band {
-            background: linear-gradient(135deg, #ecfeff 0%, #f8fafc 100%);
-            border: 1px solid #cfe8e8;
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.18) 0%, rgba(255, 158, 0, 0) 38%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.18) 0%, rgba(0, 180, 216, 0) 34%),
+                linear-gradient(135deg, #fff8ee 0%, #f7fbff 56%, #f1f7ff 100%);
+            border: 1px solid rgba(0, 119, 182, 0.18);
             border-radius: 16px;
+            box-shadow:
+                0 14px 28px rgba(16, 42, 86, 0.10),
+                inset 0 1px 0 rgba(255, 255, 255, 0.74);
             margin: 1.15rem 0 1rem;
+            overflow: hidden;
             padding: 0.85rem 1rem 0.9rem;
+            position: relative;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+        }
+
+        .app-band::before {
+            background: linear-gradient(90deg, var(--hero-orange) 0%, var(--hero-amber) 28%, var(--hero-sky) 66%, var(--hero-blue) 100%);
+            content: "";
+            height: 4px;
+            left: 0;
+            opacity: 0.98;
+            position: absolute;
+            right: 0;
+            top: 0;
+        }
+
+        .app-band > * {
+            position: relative;
+            z-index: 1;
         }
 
         .app-band-kicker {
-            color: var(--app-accent);
+            color: #0f7a95;
             font-size: 0.72rem;
             font-weight: 700;
             letter-spacing: 0.08em;
@@ -367,7 +564,7 @@ def _apply_app_theme() -> None:
         }
 
         .app-band-title {
-            color: var(--app-ink);
+            color: #193457;
             font-size: 1.3rem;
             font-weight: 800;
             line-height: 1.15;
@@ -375,7 +572,7 @@ def _apply_app_theme() -> None:
         }
 
         .app-band-copy {
-            color: var(--app-muted);
+            color: #617994;
             font-size: 0.94rem;
             margin-top: 0.22rem;
         }
@@ -447,33 +644,118 @@ def _apply_app_theme() -> None:
         }
 
         .request-stat {
-            background: linear-gradient(135deg, #f8fbfc 0%, #eefaf8 100%);
-            border: 1px solid #d8ece8;
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.14) 0%, rgba(255, 158, 0, 0) 40%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.14) 0%, rgba(0, 180, 216, 0) 36%),
+                linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(242, 248, 252, 0.98) 100%);
+            border: 1px solid rgba(16, 42, 86, 0.14);
             border-radius: 16px;
-            padding: 0.9rem 1rem;
+            box-shadow:
+                0 14px 28px rgba(16, 42, 86, 0.10),
+                inset 0 1px 0 rgba(255, 255, 255, 0.72);
             margin-bottom: 0.75rem;
+            overflow: hidden;
+            padding: 0.9rem 1rem;
+            position: relative;
+            transform: translateY(0);
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+        }
+
+        .request-stat::before {
+            background: linear-gradient(90deg, var(--hero-orange) 0%, var(--hero-amber) 26%, var(--hero-sky) 62%, var(--hero-blue) 100%);
+            content: "";
+            height: 4px;
+            left: 0;
+            opacity: 0.98;
+            position: absolute;
+            right: 0;
+            top: 0;
+        }
+
+        .request-stat::after {
+            background:
+                linear-gradient(120deg, rgba(255, 255, 255, 0.22) 0%, rgba(255, 255, 255, 0) 46%),
+                linear-gradient(135deg, rgba(2, 48, 113, 0.07) 0%, rgba(2, 48, 113, 0) 56%);
+            content: "";
+            inset: 0;
+            pointer-events: none;
+            position: absolute;
+        }
+
+        .request-stat > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .request-stat--warm {
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.34) 0%, rgba(255, 158, 0, 0) 42%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.18) 0%, rgba(0, 180, 216, 0) 36%),
+                linear-gradient(135deg, #fff4e8 0%, #fff9f1 36%, #eef8fc 100%);
+            border-color: rgba(255, 133, 0, 0.24);
+            box-shadow:
+                0 16px 30px rgba(255, 145, 0, 0.12),
+                0 10px 22px rgba(16, 42, 86, 0.08),
+                inset 0 1px 0 rgba(255, 255, 255, 0.76);
+        }
+
+        .request-stat--warm .request-stat-label {
+            color: #c2601d;
+        }
+
+        .request-stat--warm .request-stat-value {
+            color: #17304f;
+        }
+
+        .request-stat--warm .request-stat-copy {
+            color: #6d6f86;
+        }
+
+        .request-stat--cool {
+            background:
+                radial-gradient(circle at top left, rgba(0, 180, 216, 0.26) 0%, rgba(0, 180, 216, 0) 40%),
+                radial-gradient(circle at bottom right, rgba(2, 48, 94, 0.14) 0%, rgba(2, 48, 94, 0) 34%),
+                linear-gradient(135deg, #eef9ff 0%, #f5fbff 40%, #fff8f1 100%);
+            border-color: rgba(0, 119, 182, 0.24);
+            box-shadow:
+                0 16px 30px rgba(0, 119, 182, 0.12),
+                0 10px 22px rgba(16, 42, 86, 0.08),
+                inset 0 1px 0 rgba(255, 255, 255, 0.76);
+        }
+
+        .request-stat--cool::before {
+            background: linear-gradient(90deg, #00b4d8 0%, #0096c7 36%, #0077b6 74%, #ff9100 100%);
+        }
+
+        .request-stat--cool .request-stat-label {
+            color: #157897;
+        }
+
+        .request-stat--cool .request-stat-value {
+            color: #163455;
+        }
+
+        .request-stat--cool .request-stat-copy {
+            color: #627995;
         }
 
         .request-stat-label {
-            color: var(--app-muted);
             font-size: 0.78rem;
-            font-weight: 600;
-            letter-spacing: 0.03em;
+            font-weight: 700;
+            letter-spacing: 0.05em;
             text-transform: uppercase;
         }
 
         .request-stat-value {
-            color: var(--app-ink);
-            font-size: 1.5rem;
+            font-size: 1.6rem;
             font-weight: 800;
             line-height: 1.1;
-            margin-top: 0.2rem;
+            margin-top: 0.24rem;
         }
 
         .request-stat-copy {
-            color: var(--app-muted);
             font-size: 0.88rem;
-            margin-top: 0.18rem;
+            margin-top: 0.22rem;
         }
 
         .request-day-heading {
@@ -597,11 +879,68 @@ def _apply_app_theme() -> None:
         }
 
         @media (hover: hover) {
+            .app-hero:hover,
+            .app-band:hover,
+            .request-stat:hover,
             .slot-card:hover,
             .request-card:hover,
             .public-request-card:hover {
                 transform: translateY(3px);
                 box-shadow: 0 4px 12px rgba(79, 116, 139, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+            }
+
+            .app-hero:hover {
+                border-color: rgba(16, 42, 86, 0.26);
+                box-shadow:
+                    0 10px 22px rgba(16, 42, 86, 0.14),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .app-hero--primary:hover {
+                border-color: rgba(255, 109, 0, 0.34);
+                box-shadow:
+                    0 12px 24px rgba(255, 109, 0, 0.14),
+                    0 8px 20px rgba(2, 48, 94, 0.12),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .app-hero--welcome:hover {
+                border-color: rgba(0, 119, 182, 0.34);
+                box-shadow:
+                    0 12px 24px rgba(0, 119, 182, 0.16),
+                    0 8px 20px rgba(16, 42, 86, 0.11),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .app-band:hover {
+                border-color: rgba(255, 109, 0, 0.28);
+                box-shadow:
+                    0 12px 24px rgba(255, 145, 0, 0.12),
+                    0 8px 20px rgba(16, 42, 86, 0.10),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .request-stat:hover {
+                border-color: rgba(16, 42, 86, 0.24);
+                box-shadow:
+                    0 10px 22px rgba(16, 42, 86, 0.14),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .request-stat--warm:hover {
+                border-color: rgba(255, 109, 0, 0.34);
+                box-shadow:
+                    0 12px 24px rgba(255, 109, 0, 0.16),
+                    0 8px 20px rgba(16, 42, 86, 0.10),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            }
+
+            .request-stat--cool:hover {
+                border-color: rgba(0, 119, 182, 0.34);
+                box-shadow:
+                    0 12px 24px rgba(0, 119, 182, 0.16),
+                    0 8px 20px rgba(16, 42, 86, 0.10),
+                    inset 0 1px 0 rgba(255, 255, 255, 0.45);
             }
         }
 
@@ -636,11 +975,16 @@ def _apply_app_theme() -> None:
         }
 
         .sidebar-signoff-badge {
-            background: linear-gradient(135deg, #eefaf8 0%, #f8fbfc 100%);
-            border: 1px solid #cfe3e0;
+            background:
+                radial-gradient(circle at top right, rgba(255, 158, 0, 0.28) 0%, rgba(255, 158, 0, 0) 42%),
+                radial-gradient(circle at left center, rgba(0, 180, 216, 0.20) 0%, rgba(0, 180, 216, 0) 36%),
+                linear-gradient(135deg, #fff5e9 0%, #f7fbff 58%, #eef5ff 100%);
+            border: 1px solid rgba(0, 119, 182, 0.24);
             border-radius: 999px;
-            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
-            color: var(--app-accent);
+            box-shadow:
+                0 12px 24px rgba(16, 42, 86, 0.12),
+                inset 0 1px 0 rgba(255, 255, 255, 0.72);
+            color: #17385f;
             display: inline-flex;
             font-size: 0.92rem;
             font-weight: 800;
@@ -651,8 +995,12 @@ def _apply_app_theme() -> None:
         }
 
         .sidebar-signoff-badge:hover {
-            border-color: #9fd2ca;
-            color: #0b5f59;
+            border-color: rgba(255, 109, 0, 0.34);
+            box-shadow:
+                0 14px 26px rgba(255, 109, 0, 0.16),
+                0 8px 18px rgba(16, 42, 86, 0.12),
+                inset 0 1px 0 rgba(255, 255, 255, 0.45);
+            color: #c75d16;
         }
         </style>
         """,
@@ -688,7 +1036,7 @@ def _render_authenticated_greeting(user: dict[str, str]) -> None:
     email_line = f"<div class='app-hero-copy'>{escape(' · '.join(summary_parts))}</div>" if summary_parts else ""
     st.markdown(
         f"""
-        <div class="app-hero">
+        <div class="app-hero app-hero--welcome">
             <div class="app-hero-kicker">Welcome</div>
             <div class="app-hero-title">Hello, {escape(display_name)}</div>
             {email_line}
@@ -703,7 +1051,7 @@ def _render_login_screen() -> bool:
     st.sidebar.empty()
     st.markdown(
         """
-        <div class="app-hero">
+        <div class="app-hero app-hero--primary">
             <div class="app-hero-kicker">Brompton Health PCN</div>
             <div class="app-hero-title">Sign in to Pharm-Cal</div>
             <div class="app-hero-copy">Use your Supabase email and password to open the booking calendar. Surgery users and pharmacists can both sign in here.</div>
@@ -854,10 +1202,10 @@ def _normalize_date_range_value(
     return start, end
 
 
-def _render_request_stat(label: str, value: str, copy: str) -> None:
+def _render_request_stat(label: str, value: str, copy: str, tone: str = "warm") -> None:
     st.markdown(
         f"""
-        <div class="request-stat">
+        <div class="request-stat request-stat--{escape(tone)}">
             <div class="request-stat-label">{escape(label)}</div>
             <div class="request-stat-value">{escape(value)}</div>
             <div class="request-stat-copy">{escape(copy)}</div>
@@ -1077,13 +1425,13 @@ def _render_future_requests_board(future_requests: pd.DataFrame, *, sidebar: boo
         stat_row_one = st.sidebar.columns(2)
         stat_row_two = st.sidebar.columns(2)
         with stat_row_one[0]:
-            _render_request_stat("Total", str(total_requests), "Future requests")
+            _render_request_stat("Total", str(total_requests), "Future requests", tone="warm")
         with stat_row_one[1]:
-            _render_request_stat("Pending", str(pending_requests), "Awaiting review")
+            _render_request_stat("Pending", str(pending_requests), "Awaiting review", tone="cool")
         with stat_row_two[0]:
-            _render_request_stat("7 days", str(upcoming_this_week), "Due soon")
+            _render_request_stat("7 days", str(upcoming_this_week), "Due soon", tone="warm")
         with stat_row_two[1]:
-            _render_request_stat("Surgeries", str(surgeries_covered), "Distinct sites")
+            _render_request_stat("Surgeries", str(surgeries_covered), "Distinct sites", tone="cool")
 
         st.sidebar.caption("Cross-check these requests against the live rota in the main calendar, then book the matching slot.")
 
@@ -1800,7 +2148,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
     # --- Main Calendar Display ---
     st.markdown(
         """
-        <div class="app-hero">
+        <div class="app-hero app-hero--primary">
             <div class="app-hero-kicker">Brompton Health PCN</div>
             <div class="app-hero-title">Request a Pharmacist Session</div>
             <div class="app-hero-copy">Browse advertised sessions, book available slots, and submit requests beyond the current schedule.</div>
@@ -1823,8 +2171,13 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
         st.info("No pharmacist shifts have been scheduled yet. Contact admin.")
         return
 
-    # All data, sorted, will be the base for filtering
-    df_sorted = df.sort_values(['Date', 'am_pm', 'slot_index'])
+    current_user_surgery_name = _current_user_surgery_name()
+
+    # Collapse duplicate rows for the same slot so booked sessions never surface as bookable alternatives.
+    df_sorted = _collapse_schedule_slots_for_display(
+        df.sort_values(['Date', 'am_pm', 'slot_index'], kind="stable"),
+        preferred_surgery_name=current_user_surgery_name,
+    )
 
     # For 'future requests', we still need to know the last advertised date from today onwards.
     upcoming = df[df['Date'] >= datetime.today()].sort_values(['Date', 'am_pm', 'slot_index'])
@@ -1849,16 +2202,46 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
         default_start=default_start_date,
         default_end=min(default_end_date, slider_max_date),
     )
+    show_surgery_toggle = _can_toggle_surgery_calendar_view()
+    surgery_view_only = False
+    if show_surgery_toggle:
+        toggle_key = f"calendar_surgery_only_{_current_user_surgery_id()}"
+        surgery_view_only = st.toggle(
+            f":material/visibility: View **{current_user_surgery_name}** sessions only",
+            key=toggle_key,
+            value=bool(st.session_state.get(toggle_key, False)),
+        )
 
     # Filter schedule based on the selected date range
     schedule_filtered = df_sorted[
         (df_sorted['Date'].dt.date >= selected_range[0]) &
         (df_sorted['Date'].dt.date <= selected_range[1])
     ]
+    hidden_booked_sessions = 0
+    if surgery_view_only:
+        schedule_filtered, hidden_booked_sessions = _filter_schedule_for_surgery_view(
+            schedule_filtered,
+            current_user_surgery_name,
+        )
+        displayed_surgery_sessions = int(
+            (
+                schedule_filtered["surgery"].fillna("").astype(str).str.strip().str.casefold()
+                == current_user_surgery_name.strip().casefold()
+            ).sum()
+        )
+        if hidden_booked_sessions or displayed_surgery_sessions:
+            st.caption(
+                f"Showing available sessions plus bookings for {current_user_surgery_name}. "
+                f"**{displayed_surgery_sessions} session(s)** for **{current_user_surgery_name}** are currently displayed, "
+                f"and {hidden_booked_sessions} booked session(s) for other surgeries are hidden."
+            )
 
     # Display existing pharmacist schedule
     if schedule_filtered.empty:
-        st.info("No shifts available in the selected date range.")
+        if surgery_view_only:
+            st.info(f"No available or {current_user_surgery_name} sessions found in the selected date range.")
+        else:
+            st.info("No shifts available in the selected date range.")
 
     for date, daily in schedule_filtered.groupby(schedule_filtered['Date'].dt.date):
         if date.weekday() >= 5: # Skip weekends for advertised dates
@@ -1876,7 +2259,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                 if not slot_data.empty:
                     row = slot_data.iloc[0]
                     pharmacist_name = row['pharmacist_name']
-                    booked = str(row['booked']).upper() == "TRUE"
+                    booked = _is_booked_value(row['booked'])
                     surgery_name = row['surgery'] if booked else None
                     _render_slot_card(
                         pharmacist_name,
@@ -1914,7 +2297,7 @@ def display_calendar(auth_user: dict[str, str], unbook_mode: bool = False):
                 if not slot_data.empty:
                     row = slot_data.iloc[0]
                     pharmacist_name = row['pharmacist_name']
-                    booked = str(row['booked']).upper() == "TRUE"
+                    booked = _is_booked_value(row['booked'])
                     surgery_name = row['surgery'] if booked else None
                     _render_slot_card(
                         pharmacist_name,
