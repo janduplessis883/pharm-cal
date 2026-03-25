@@ -346,6 +346,13 @@ def _apply_app_theme() -> None:
             --app-surface: #f8fafc;
             --app-accent: #0f766e;
             --app-accent-soft: #e6fffb;
+            --status-red: #ae4f4d;
+            --status-orange: #ebbd5a;
+            --status-yellow: #e4af6c;
+            --status-green: #aec867;
+            --status-blue: #659bb7;
+            --status-violet: #db2777;
+            --status-gray: #a3a3a3;
             --hero-navy: #102a56;
             --hero-blue: #0077b6;
             --hero-sky: #00b4d8;
@@ -819,18 +826,18 @@ def _apply_app_theme() -> None:
         }
 
         .request-status-pill--pending {
-            background: #fff7ed;
-            color: #c2410c;
+            background: var(--status-orange);
+            color: #ffffff;
         }
 
         .request-status-pill--approved {
-            background: #ecfdf5;
-            color: #15803d;
+            background: var(--status-green);
+            color: #ffffff;
         }
 
         .request-status-pill--rejected {
-            background: #fef2f2;
-            color: #b91c1c;
+            background: var(--status-red);
+            color: #ffffff;
         }
 
         .request-status-pill--default {

@@ -222,35 +222,6 @@ def sign_in_with_email_password(email: str, password: str) -> dict[str, Any]:
     return _build_authenticated_user_payload(user)
 
 
-def exchange_auth_code_for_session(code: str) -> dict[str, Any]:
-    auth_client = get_supabase_auth_client()
-    response = auth_client.auth.exchange_code_for_session({"auth_code": code})
-    user = getattr(response, "user", None)
-    session = getattr(response, "session", None)
-    if not user or not session:
-        raise ValueError("Could not create a Supabase session from the invite link.")
-    return _build_authenticated_user_payload(user)
-
-
-def set_auth_session(access_token: str, refresh_token: str) -> dict[str, Any]:
-    auth_client = get_supabase_auth_client()
-    response = auth_client.auth.set_session(access_token, refresh_token)
-    user = getattr(response, "user", None)
-    session = getattr(response, "session", None)
-    if not user or not session:
-        raise ValueError("Could not restore the Supabase session from the provided tokens.")
-    return _build_authenticated_user_payload(user)
-
-
-def update_authenticated_user_password(password: str) -> dict[str, Any]:
-    auth_client = get_supabase_auth_client()
-    response = auth_client.auth.update_user({"password": password})
-    user = getattr(response, "user", None)
-    if not user:
-        raise ValueError("Supabase did not return the updated user after setting a password.")
-    return _build_authenticated_user_payload(user)
-
-
 def sign_out_authenticated_user() -> None:
     auth_client = get_supabase_auth_client()
     auth_client.auth.sign_out()
